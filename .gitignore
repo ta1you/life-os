@@ -3,3 +3,10 @@ dist/
 .env
 .firebase/
 backup_before_ui/
+
+# Local backup files
+*.backup
+*.before-fix
+*.corrupted
+*.error-backup
+App_before_work_fix.jsx
