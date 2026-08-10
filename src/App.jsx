@@ -1,489 +1,2084 @@
 import { useState, useEffect } from 'react';
+import { PieChart, Pie, Cell, BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import './App.css';
+import { auth, db } from './firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged,
+  sendPasswordResetEmail
+} from 'firebase/auth';
+import { 
+  collection, 
+  doc, 
+  addDoc, 
+  deleteDoc, 
+  onSnapshot, 
+  query, 
+  where,
+  getDocs,
+  writeBatch
+} from 'firebase/firestore';
 
 function App() {
-  const [activeTab, setActiveTab] = useState('schedule');
+  // Auth states
+  const [user, setUser] = useState(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('');
+  const [authMode, setAuthMode] = useState('login'); // 'login', 'register', 'forgot_password'
+  const [authError, setAuthError] = useState('');
+  const [authSuccessMessage, setAuthSuccessMessage] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
+  const [currentBottomTab, setCurrentBottomTab] = useState('calendar'); // 'calendar', 'finance', 'memo', 'settings'
+  const [activeTopTab, setActiveTopTab] = useState('schedule'); // 'schedule', 'finance'
+  
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   
-  // モーダルの状態
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalType, setModalType] = useState('schedule'); // 'schedule' | 'expense' | 'income'
+  // Modals & Panels
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [addModalType, setAddModalType] = useState('schedule');
   
-  // フォームの状態
+  // Finance & Schedule Detail Panel
+  const [isDailyDetailOpen, setIsDailyDetailOpen] = useState(false);
+  const [detailTab, setDetailTab] = useState('schedule'); // 'schedule', 'finance'
+  const [isCategoryDetailOpen, setIsCategoryDetailOpen] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState(null);
+
+  // Settings states
+  const [isUpdateCacheOpen, setIsUpdateCacheOpen] = useState(false);
+  const [updateModalStep, setUpdateModalStep] = useState(null); // 'checking', 'success', null
+  const [cacheModalStep, setCacheModalStep] = useState(null); // 'confirm', 'success', null
+  const [isDataManagementOpen, setIsDataManagementOpen] = useState(false);
+
+  // Swipe gesture for daily navigation
+  const [touchStart, setTouchStart] = useState(0);
+  const [touchEnd, setTouchEnd] = useState(0);
+
+  // Recurring Schedule states
+  const [selectedWeekdays, setSelectedWeekdays] = useState([]);
+  const [endSetting, setEndSetting] = useState('forever'); // 'forever', 'date'
+  const [endSettingDate, setEndSettingDate] = useState('');
+  const [isConfirmRecurringOpen, setIsConfirmRecurringOpen] = useState(false);
+  const [recurringDatesToRegister, setRecurringDatesToRegister] = useState([]);
+  const [tempScheduleData, setTempScheduleData] = useState(null);
+
+  // Memos state
+  const [memos, setMemos] = useState(() => {
+    const saved = localStorage.getItem('lifeos_memos');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [memoInput, setMemoInput] = useState('');
+
+  // Share & Search states
+  const [isShareSelectOpen, setIsShareSelectOpen] = useState(false);
+  const [scheduleSearchQuery, setScheduleSearchQuery] = useState('');
+
+  // Form Data
   const [formData, setFormData] = useState({
-    title: '',
-    timeStart: '',
-    timeEnd: '',
-    color: '#3b82f6',
-    amount: '',
-    category: ''
+    title: '', timeStart: '', timeEnd: '', color: '#3b82f6', amount: '', category: '', dateStr: '', location: '', recurring: 'none'
   });
   
-  // 予定データ（ローカルストレージから読み込み）
+  // Data State
   const [schedules, setSchedules] = useState(() => {
     const saved = localStorage.getItem('lifeos_schedules');
     return saved ? JSON.parse(saved) : [];
   });
   
-  // 収支データ（ローカルストレージから読み込み）
   const [finances, setFinances] = useState(() => {
     const saved = localStorage.getItem('lifeos_finances');
     return saved ? JSON.parse(saved) : [];
   });
 
-  // データが更新されたらローカルストレージに保存
+  const [timetable, setTimetable] = useState([]);
+  const [shifts, setShifts] = useState([]);
+
+  const hourlyWage = 1180;
+
+  // Firebase Auth state observer
   useEffect(() => {
-    localStorage.setItem('lifeos_schedules', JSON.stringify(schedules));
-  }, [schedules]);
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) {
+        setSchedules([]);
+        setFinances([]);
+        setMemos([]);
+        setTimetable([]);
+        setShifts([]);
+        localStorage.removeItem('lifeos_schedules');
+        localStorage.removeItem('lifeos_finances');
+        localStorage.removeItem('lifeos_memos');
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Sync school timetable from Firestore
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'school', user.uid, 'timetable'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setTimetable(list);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // Sync work shifts from Firestore
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'work', user.uid, 'shifts'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setShifts(list);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // Sync schedules from Firestore
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'users', user.uid, 'schedules'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setSchedules(list);
+      localStorage.setItem('lifeos_schedules', JSON.stringify(list));
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // Sync finances from Firestore
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'users', user.uid, 'finances'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setFinances(list);
+      localStorage.setItem('lifeos_finances', JSON.stringify(list));
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // Sync memos from Firestore
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'users', user.uid, 'memos'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setMemos(list);
+      localStorage.setItem('lifeos_memos', JSON.stringify(list));
+    });
+    return () => unsubscribe();
+  }, [user]);
 
   useEffect(() => {
-    localStorage.setItem('lifeos_finances', JSON.stringify(finances));
-  }, [finances]);
+    if (currentBottomTab === 'calendar') setActiveTopTab('schedule');
+    else if (currentBottomTab === 'finance') setActiveTopTab('finance');
+  }, [currentBottomTab]);
 
-  // カレンダーのロジック
+  const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
+  const today = new Date();
+
+  const safeParseDate = (d) => {
+    if (!d) return null;
+    if (d instanceof Date) return d;
+    if (typeof d === 'string') {
+      const parts = d.split('-');
+      if (parts.length === 3 && !d.includes('T')) {
+        const y = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10) - 1;
+        const _d = parseInt(parts[2], 10);
+        if (!isNaN(y) && !isNaN(m) && !isNaN(_d)) {
+          return new Date(y, m, _d, 12, 0, 0); // local date at noon
+        }
+      }
+    }
+    const parsed = new Date(d);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const isSameDay = (d1, d2) => {
+    const date1 = safeParseDate(d1);
+    const date2 = safeParseDate(d2);
+    if (!date1 || !date2) return false;
+    return date1.getFullYear() === date2.getFullYear() && date1.getMonth() === date2.getMonth() && date1.getDate() === date2.getDate();
+  };
+
   const getDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
   const getFirstDayOfMonth = (year, month) => new Date(year, month, 1).getDay();
 
   const generateCalendarDays = () => {
     const year = currentMonth.getFullYear();
     const month = currentMonth.getMonth();
-    
     const daysInMonth = getDaysInMonth(year, month);
     const firstDay = getFirstDayOfMonth(year, month);
-    
     const days = [];
-    
-    // 前月のパディング
     const prevMonthDays = getDaysInMonth(year, month - 1);
-    for (let i = 0; i < firstDay; i++) {
-      days.push({
-        date: new Date(year, month - 1, prevMonthDays - firstDay + i + 1),
-        isCurrentMonth: false
-      });
-    }
-    
-    // 当月の日付
-    for (let i = 1; i <= daysInMonth; i++) {
-      days.push({
-        date: new Date(year, month, i),
-        isCurrentMonth: true
-      });
-    }
-    
-    // 翌月のパディング
+    for (let i = 0; i < firstDay; i++) days.push({ date: new Date(year, month - 1, prevMonthDays - firstDay + i + 1), isCurrentMonth: false });
+    for (let i = 1; i <= daysInMonth; i++) days.push({ date: new Date(year, month, i), isCurrentMonth: true });
     const remainingDays = 42 - days.length;
-    for (let i = 1; i <= remainingDays; i++) {
-      days.push({
-        date: new Date(year, month + 1, i),
-        isCurrentMonth: false
-      });
-    }
-    
+    for (let i = 1; i <= remainingDays; i++) days.push({ date: new Date(year, month + 1, i), isCurrentMonth: false });
     return days;
   };
 
+  const getDayJa = (date) => {
+    const days = ['日', '月', '火', '水', '木', '金', '土'];
+    return days[date.getDay()];
+  };
+
+  const getTimetableSchedulesForDate = (date) => {
+    const dayJa = getDayJa(date);
+    return timetable
+      .filter(t => t.day === dayJa)
+      .map(t => ({
+        id: `timetable-${t.id}`,
+        title: `${t.subject} (学校)`,
+        timeStart: t.startTime,
+        timeEnd: t.endTime,
+        color: '#3b82f6', // blue
+        date: date,
+        isSchool: true
+      }));
+  };
+
+  const getShiftSchedulesForDate = (date) => {
+    return shifts
+      .filter(s => {
+        const sDate = safeParseDate(s.startTime);
+        return sDate && isSameDay(sDate, date);
+      })
+      .map(s => {
+        const sStart = safeParseDate(s.startTime);
+        const sEnd = safeParseDate(s.endTime);
+        const formatTime = (d) => d ? d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '';
+        return {
+          id: `shift-${s.id}`,
+          title: `${s.store} (バイト)`,
+          timeStart: formatTime(sStart),
+          timeEnd: formatTime(sEnd),
+          color: '#ef8f3b', // orange
+          date: date,
+          isWork: true,
+          estimatedPay: s.estimatedPay,
+          workHours: s.workHours
+        };
+      });
+  };
+
+  const getMergedSchedulesForDate = (date) => {
+    if (!user) return [];
+    const local = schedules.filter(s => isSameDay(s.date, date));
+    const schoolEvents = getTimetableSchedulesForDate(date);
+    const workEvents = getShiftSchedulesForDate(date);
+    return [...local, ...schoolEvents, ...workEvents].sort((a, b) => 
+      (a.timeStart || '').localeCompare(b.timeStart || '')
+    );
+  };
+
   const calendarDays = generateCalendarDays();
-  const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
-
-  const prevMonth = () => {
-    setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1));
-  };
-
-  const nextMonth = () => {
-    setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1));
-  };
-
-  const isSameDay = (d1, d2) => {
-    if (!d1 || !d2) return false;
-    const date1 = new Date(d1);
-    const date2 = new Date(d2);
-    return date1.getFullYear() === date2.getFullYear() &&
-           date1.getMonth() === date2.getMonth() &&
-           date1.getDate() === date2.getDate();
-  };
-
-  const today = new Date();
-
-  // ====== データ処理 ======
-  const selectedDateSchedules = schedules.filter(s => isSameDay(s.date, selectedDate));
+  const selectedDateSchedules = getMergedSchedulesForDate(selectedDate);
   const selectedDateFinances = finances.filter(f => isSameDay(f.date, selectedDate));
 
-  const todayExpense = finances
-    .filter(f => isSameDay(f.date, today) && f.amount < 0)
-    .reduce((sum, f) => sum + f.amount, 0);
-
-  const monthExpense = finances
-    .filter(f => {
-      const d = new Date(f.date);
-      return d.getFullYear() === currentMonth.getFullYear() && 
-             d.getMonth() === currentMonth.getMonth() && 
-             f.amount < 0;
-    })
-    .reduce((sum, f) => sum + f.amount, 0);
-
-  const getSchedulesForDate = (date) => {
-    return schedules.filter(s => isSameDay(s.date, date)).slice(0, 3);
+  // --- Utility ---
+  const parseDate = (str) => {
+    if (!str) return new Date();
+    const parts = str.split('-');
+    if (parts.length === 3) {
+      const y = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10) - 1;
+      const d = parseInt(parts[2], 10);
+      if (!isNaN(y) && !isNaN(m) && !isNaN(d)) {
+        return new Date(y, m, d, 12, 0, 0); // Use noon local time to avoid timezone offset shifts
+      }
+    }
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? new Date() : d;
   };
 
-  const formatDateString = (d) => {
-    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 (${weekdays[d.getDay()]})`;
+  const formatDateForInput = (d) => {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   };
 
-  // ====== フォーム操作 ======
-  const resetForm = () => {
-    setFormData({
-      title: '', timeStart: '', timeEnd: '', color: '#3b82f6', amount: '', category: ''
-    });
+  const calculateDuration = (start, end) => {
+    if (!start || !end) return 0;
+    const [startH, startM] = start.split(':').map(Number);
+    const [endH, endM] = end.split(':').map(Number);
+    let diff = (endH + endM / 60) - (startH + startM / 60);
+    if (diff < 0) diff += 24; // Crossed midnight
+    return diff;
   };
 
-  const handleScheduleSubmit = (e) => {
+  // --- Recurring Schedule Dates Generator ---
+  const generateRecurringDates = (startDate, pattern, weekdays, endType, endDateVal) => {
+    const dates = [];
+    const start = new Date(startDate);
+    start.setHours(12, 0, 0, 0); // Use noon local time to avoid timezone offset shifts
+    
+    let limit = 5; // default occurrences preview
+    let endLimitDate = null;
+    if (endType === 'date' && endDateVal) {
+      endLimitDate = new Date(endDateVal);
+      endLimitDate.setHours(23, 59, 59, 999);
+      limit = 30; // max safe limit to avoid locking
+    }
+    
+    let current = new Date(start);
+    let count = 0;
+    
+    while (count < limit) {
+      if (endLimitDate && current > endLimitDate) {
+        break;
+      }
+      
+      let match = false;
+      if (pattern === 'daily') {
+        match = true;
+      } else if (pattern === 'weekly') {
+        const wday = current.getDay();
+        const targetDays = weekdays.length > 0 ? weekdays : [start.getDay()];
+        if (targetDays.includes(wday)) {
+          match = true;
+        }
+      } else if (pattern === 'monthly') {
+        if (current.getDate() === start.getDate()) {
+          match = true;
+        }
+      } else if (pattern === 'yearly') {
+        if (current.getMonth() === start.getMonth() && current.getDate() === start.getDate()) {
+          match = true;
+        }
+      }
+      
+      if (match) {
+        dates.push(new Date(current));
+        count++;
+      }
+      
+      current.setDate(current.getDate() + 1);
+      
+      if (dates.length >= 30 || current.getFullYear() > start.getFullYear() + 5) {
+        break;
+      }
+    }
+    return dates;
+  };
+
+  // --- Handlers ---
+  const handleScheduleSubmit = async (e) => {
     e.preventDefault();
-    const newSchedule = {
-      id: Date.now(),
-      title: formData.title,
-      timeStart: formData.timeStart,
-      timeEnd: formData.timeEnd,
-      color: formData.color,
-      date: selectedDate.toISOString(),
-      location: ''
-    };
-    setSchedules([...schedules, newSchedule]);
-    setIsModalOpen(false);
-    resetForm();
+    if (!user) return;
+    const targetDate = formData.dateStr ? parseDate(formData.dateStr) : selectedDate;
+    
+    if (formData.recurring !== 'none') {
+      const generated = generateRecurringDates(
+        targetDate,
+        formData.recurring,
+        selectedWeekdays,
+        endSetting,
+        endSettingDate
+      );
+      if (generated.length === 0) {
+        alert('該当する日付がありません。繰り返し設定を確認してください。');
+        return;
+      }
+      setRecurringDatesToRegister(generated);
+      setTempScheduleData({
+        title: formData.title,
+        timeStart: formData.timeStart || '',
+        timeEnd: formData.timeEnd || '',
+        color: formData.color,
+        location: formData.location || '',
+        recurring: formData.recurring
+      });
+      setIsConfirmRecurringOpen(true);
+    } else {
+      try {
+        await addDoc(collection(db, 'users', user.uid, 'schedules'), {
+          title: formData.title,
+          timeStart: formData.timeStart || '',
+          timeEnd: formData.timeEnd || '',
+          color: formData.color,
+          date: targetDate.toISOString(),
+          location: formData.location || '',
+          createdAt: new Date().toISOString()
+        });
+        setIsAddModalOpen(false);
+      } catch (err) {
+        console.error(err);
+        alert('予定の登録に失敗しました。');
+      }
+    }
   };
 
-  const handleFinanceSubmit = (e) => {
+  const executeRecurringRegister = async () => {
+    if (!user) return;
+    try {
+      const batch = writeBatch(db);
+      const recurringId = String(Date.now());
+      recurringDatesToRegister.forEach((date) => {
+        const docRef = doc(collection(db, 'users', user.uid, 'schedules'));
+        batch.set(docRef, {
+          title: tempScheduleData.title,
+          timeStart: tempScheduleData.timeStart,
+          timeEnd: tempScheduleData.timeEnd,
+          color: tempScheduleData.color,
+          date: date.toISOString(),
+          location: tempScheduleData.location,
+          recurringId: recurringId,
+          recurringPattern: tempScheduleData.recurring,
+          createdAt: new Date().toISOString()
+        });
+      });
+      await batch.commit();
+      setIsConfirmRecurringOpen(false);
+      setIsAddModalOpen(false);
+    } catch (err) {
+      console.error(err);
+      alert('繰り返し予定の登録に失敗しました。');
+    }
+  };
+
+  const deleteSchedule = async (id) => {
+    if (!user) return;
+    const scheduleToDelete = schedules.find(s => s.id === id);
+    if (!scheduleToDelete) return;
+    
+    if (scheduleToDelete.recurringId) {
+      if (confirm('この予定は繰り返し登録されています。すべての繰り返し予定を削除しますか？\n「キャンセル」を押すとこの予定のみ削除します。')) {
+        try {
+          const batch = writeBatch(db);
+          const matching = schedules.filter(s => s.recurringId === scheduleToDelete.recurringId);
+          matching.forEach((s) => {
+            const docRef = doc(db, 'users', user.uid, 'schedules', s.id);
+            batch.delete(docRef);
+          });
+          await batch.commit();
+        } catch (err) {
+          console.error(err);
+          alert('削除に失敗しました。');
+        }
+      } else {
+        try {
+          await deleteDoc(doc(db, 'users', user.uid, 'schedules', id));
+        } catch (err) {
+          console.error(err);
+          alert('削除に失敗しました。');
+        }
+      }
+    } else {
+      if (confirm('この予定を削除しますか？')) {
+        try {
+          await deleteDoc(doc(db, 'users', user.uid, 'schedules', id));
+        } catch (err) {
+          console.error(err);
+          alert('削除に失敗しました。');
+        }
+      }
+    }
+  };
+
+  const deleteFinance = async (id) => {
+    if (!user) return;
+    if (confirm('この収支履歴を削除しますか？')) {
+      try {
+        await deleteDoc(doc(db, 'users', user.uid, 'finances', id));
+      } catch (err) {
+        console.error(err);
+        alert('削除に失敗しました。');
+      }
+    }
+  };
+
+  const handleFinanceSubmit = async (e) => {
     e.preventDefault();
+    if (!user) return;
     const amountNum = parseInt(formData.amount, 10);
     if (isNaN(amountNum)) return;
-    
-    const finalAmount = modalType === 'expense' ? -Math.abs(amountNum) : Math.abs(amountNum);
-    
-    const newFinance = {
-      id: Date.now(),
-      title: formData.category || (modalType === 'expense' ? '支出' : '収入'),
-      category: formData.category || (modalType === 'expense' ? '支出' : '収入'),
-      amount: finalAmount,
-      time: new Date().toLocaleTimeString('ja-JP', {hour: '2-digit', minute:'2-digit'}),
-      date: selectedDate.toISOString()
-    };
-    setFinances([...finances, newFinance]);
-    setIsModalOpen(false);
-    resetForm();
-  };
-
-  const handleDeleteSchedule = (id) => {
-    if(window.confirm('この予定を削除しますか？')) {
-      setSchedules(schedules.filter(s => s.id !== id));
+    const finalAmount = addModalType === 'expense' ? -Math.abs(amountNum) : Math.abs(amountNum);
+    const targetDate = formData.dateStr ? parseDate(formData.dateStr) : selectedDate;
+    try {
+      await addDoc(collection(db, 'users', user.uid, 'finances'), {
+        title: formData.title || (addModalType === 'expense' ? '支出' : '収入'),
+        category: formData.category || (addModalType === 'expense' ? '支出' : '収入'),
+        amount: finalAmount,
+        time: new Date().toLocaleTimeString('ja-JP', {hour: '2-digit', minute:'2-digit'}),
+        date: targetDate.toISOString(),
+        createdAt: new Date().toISOString()
+      });
+      setIsAddModalOpen(false);
+    } catch (err) {
+      console.error(err);
+      alert('収支の記録に失敗しました。');
     }
   };
 
-  const handleDeleteFinance = (id) => {
-    if(window.confirm('この履歴を削除しますか？')) {
-      setFinances(finances.filter(f => f.id !== id));
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) {
+      setAuthError('メールアドレスとパスワードを入力してください。');
+      return;
+    }
+
+    if (authMode === 'register') {
+      if (authPassword.length < 6) {
+        setAuthError('パスワードは6文字以上で入力してください。');
+        return;
+      }
+      if (authPassword !== authConfirmPassword) {
+        setAuthError('パスワードが一致しません。確認用パスワードをもう一度入力してください。');
+        return;
+      }
+    }
+
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      if (authMode === 'login') {
+        await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      } else {
+        await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      }
+    } catch (err) {
+      console.error(err);
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
+        setAuthError('メールアドレスまたはパスワードが正しくありません。');
+      } else if (err.code === 'auth/email-already-in-use') {
+        setAuthError('このメールアドレスは既に登録されています。');
+      } else if (err.code === 'auth/weak-password') {
+        setAuthError('パスワードは6文字以上で入力してください。');
+      } else if (err.code === 'auth/operation-not-allowed') {
+        setAuthError('【重要】メール/パスワード認証がFirebaseで有効化されていません。FirebaseコンソールのAuthentication設定で「メール/パスワード」を有効にしてください。');
+      } else {
+        setAuthError(`認証に失敗しました。エラー原因: ${err.code || err.message}`);
+      }
+    } finally {
+      setAuthLoading(false);
     }
   };
 
-  // カレンダー描画用ヘルパー関数
-  const renderCalendar = (tabType) => (
-    <div className="calendar-container">
-      <div className="calendar-header">
-        <button className="nav-btn" onClick={prevMonth}>&lt;</button>
-        <div className="month-title">
-          {currentMonth.getFullYear()}年 {currentMonth.getMonth() + 1}月
-        </div>
-        <button className="nav-btn" onClick={nextMonth}>&gt;</button>
-      </div>
-      
-      <div className="weekdays">
-        {weekdays.map((day, idx) => (
-          <div key={day} className={`weekday ${idx === 0 ? 'weekday-sun' : idx === 6 ? 'weekday-sat' : ''}`}>
-            {day}
-          </div>
-        ))}
-      </div>
-      
-      <div className="days-grid">
-        {calendarDays.map((dayObj, idx) => {
-          const isSelected = isSameDay(dayObj.date, selectedDate);
-          const isToday = isSameDay(dayObj.date, today);
-          
-          let cellContent = null;
-          if (tabType === 'schedule') {
-            const daySchedules = getSchedulesForDate(dayObj.date);
-            cellContent = (
-              <div className="event-chips-container">
-                {daySchedules.map((s, i) => (
-                  <div key={i} className="event-chip" style={{ backgroundColor: s.color || '#3b82f6' }}>
-                    {s.title}
-                  </div>
-                ))}
-              </div>
-            );
-          } else if (tabType === 'finance') {
-            const dayFinances = finances.filter(f => isSameDay(f.date, dayObj.date));
-            const dayTotal = dayFinances.reduce((sum, f) => sum + f.amount, 0);
-            if (dayTotal !== 0) {
-              cellContent = (
-                <div className={`finance-daily-total ${dayTotal > 0 ? 'plus' : 'minus'}`}>
-                  {dayTotal > 0 ? '+' : ''}{dayTotal.toLocaleString()}
-                </div>
-              );
+  const handlePasswordResetSubmit = async (e) => {
+    e.preventDefault();
+    if (!authEmail) {
+      setAuthError('メールアドレスを入力してください。');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthSuccessMessage('');
+    try {
+      await sendPasswordResetEmail(auth, authEmail);
+      setAuthSuccessMessage('パスワード再設定用のメールを送信しました。メールフォルダをご確認ください。');
+    } catch (err) {
+      console.error(err);
+      if (err.code === 'auth/user-not-found') {
+        setAuthError('このメールアドレスは登録されていません。');
+      } else if (err.code === 'auth/invalid-email') {
+        setAuthError('メールアドレスの形式が正しくありません。');
+      } else {
+        setAuthError(`送信に失敗しました。エラー原因: ${err.code || err.message}`);
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleClearSchedules = async () => {
+    if (!user) return;
+    if (confirm('すべての予定データを削除しますか？この操作は取り消せません。')) {
+      try {
+        const batch = writeBatch(db);
+        const snapshot = await getDocs(collection(db, 'users', user.uid, 'schedules'));
+        snapshot.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        await batch.commit();
+        alert('予定データをすべて削除しました。');
+      } catch (err) {
+        console.error(err);
+        alert('削除に失敗しました。');
+      }
+    }
+  };
+
+  const handleClearFinances = async () => {
+    if (!user) return;
+    if (confirm('すべての収支データを削除しますか？この操作は取り消せません。')) {
+      try {
+        const batch = writeBatch(db);
+        const snapshot = await getDocs(collection(db, 'users', user.uid, 'finances'));
+        snapshot.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        await batch.commit();
+        alert('収支データをすべて削除しました。');
+      } catch (err) {
+        console.error(err);
+        alert('削除に失敗しました。');
+      }
+    }
+  };
+
+  const handleClearAllData = async () => {
+    if (!user) return;
+    if (confirm('すべての予定および収支データを完全にリセットしますか？この操作は取り消せません。')) {
+      try {
+        const batch = writeBatch(db);
+        const schedSnapshot = await getDocs(collection(db, 'users', user.uid, 'schedules'));
+        schedSnapshot.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        const finSnapshot = await getDocs(collection(db, 'users', user.uid, 'finances'));
+        finSnapshot.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        await batch.commit();
+        alert('すべてのデータを削除しました。');
+      } catch (err) {
+        console.error(err);
+        alert('削除に失敗しました。');
+      }
+    }
+  };
+
+  const handleExportData = () => {
+    const dataStr = JSON.stringify({ schedules, finances, memos }, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `lifeos_backup_${new Date().toISOString().split('T')[0]}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportData = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const imported = JSON.parse(event.target.result);
+        if (!imported.schedules || !imported.finances) {
+          alert('不正なファイル形式です。バックアップファイルを選択してください。');
+          return;
+        }
+
+        if (confirm('既存のデータを上書きしてバックアップをインポートしますか？')) {
+          if (user) {
+            const batch = writeBatch(db);
+            
+            // Delete existing schedules first
+            const existingSchedules = await getDocs(collection(db, 'users', user.uid, 'schedules'));
+            existingSchedules.forEach((doc) => batch.delete(doc.ref));
+            // Add imported schedules
+            imported.schedules.forEach((s) => {
+              const docRef = doc(collection(db, 'users', user.uid, 'schedules'));
+              const { id, ...sData } = s;
+              batch.set(docRef, sData);
+            });
+
+            // Delete existing finances
+            const existingFinances = await getDocs(collection(db, 'users', user.uid, 'finances'));
+            existingFinances.forEach((doc) => batch.delete(doc.ref));
+            // Add imported finances
+            imported.finances.forEach((f) => {
+              const docRef = doc(collection(db, 'users', user.uid, 'finances'));
+              const { id, ...fData } = f;
+              batch.set(docRef, fData);
+            });
+
+            // Memos if exist
+            if (imported.memos) {
+              const existingMemos = await getDocs(collection(db, 'users', user.uid, 'memos'));
+              existingMemos.forEach((doc) => batch.delete(doc.ref));
+              imported.memos.forEach((m) => {
+                const docRef = doc(collection(db, 'users', user.uid, 'memos'));
+                const { id, ...mData } = m;
+                batch.set(docRef, mData);
+              });
             }
-          }
 
-          return (
-            <div 
-              key={idx} 
-              className={`day-cell ${!dayObj.isCurrentMonth ? 'other-month' : ''} ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''}`}
-              onClick={() => {
-                setSelectedDate(dayObj.date);
-                setModalType(tabType === 'schedule' ? 'schedule' : 'expense');
-                setIsModalOpen(true);
-              }}
-            >
-              <div className="date-number">{dayObj.date.getDate()}</div>
-              {cellContent}
-            </div>
-          );
-        })}
+            await batch.commit();
+            alert('データがインポートされ、Firestoreと同期されました。');
+          } else {
+            setSchedules(imported.schedules);
+            setFinances(imported.finances);
+            if (imported.memos) setMemos(imported.memos);
+            localStorage.setItem('lifeos_schedules', JSON.stringify(imported.schedules));
+            localStorage.setItem('lifeos_finances', JSON.stringify(imported.finances));
+            if (imported.memos) localStorage.setItem('lifeos_memos', JSON.stringify(imported.memos));
+            alert('ローカルストレージにインポートが完了しました。');
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        alert('インポートに失敗しました。ファイルを確認してください。');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleAppUpdate = () => {
+    setUpdateModalStep('checking');
+    setTimeout(() => {
+      if (navigator.serviceWorker) {
+        navigator.serviceWorker.getRegistrations().then((registrations) => {
+          for (let registration of registrations) {
+            registration.update();
+          }
+        });
+      }
+      setUpdateModalStep('success');
+    }, 1500);
+  };
+
+  const openAddModal = (type = 'schedule', initialCategory = '', initialTitle = '', customDate = null) => {
+    setAddModalType(type);
+    const targetDate = customDate || selectedDate;
+    const initialDateStr = formatDateForInput(targetDate);
+    setFormData({ 
+      title: initialTitle, timeStart: '18:00', timeEnd: '22:00', color: '#3b82f6', amount: '', 
+      category: initialCategory, 
+      dateStr: initialDateStr, location: '', recurring: 'none' 
+    });
+    setSelectedWeekdays([targetDate.getDay()]);
+    setEndSetting('forever');
+    setEndSettingDate(formatDateForInput(new Date(targetDate.getTime() + 30 * 24 * 60 * 60 * 1000)));
+    setIsAddModalOpen(true);
+  };
+
+  const handlePrevDay = () => {
+    const newDate = new Date(selectedDate);
+    newDate.setDate(newDate.getDate() - 1);
+    setSelectedDate(newDate);
+  };
+
+  const handleNextDay = () => {
+    const newDate = new Date(selectedDate);
+    newDate.setDate(newDate.getDate() + 1);
+    setSelectedDate(newDate);
+  };
+
+  const handleTouchStart = (e) => {
+    setTouchStart(e.targetTouches[0].clientX);
+    setTouchEnd(0);
+  };
+
+  const handleTouchMove = (e) => {
+    setTouchEnd(e.targetTouches[0].clientX);
+  };
+
+  const handleTouchEnd = () => {
+    if (!touchStart || !touchEnd) return;
+    const distance = touchStart - touchEnd;
+    const minSwipeDistance = 50;
+    
+    if (distance > minSwipeDistance) {
+      // Swiped left = next day
+      handleNextDay();
+    }
+    if (distance < -minSwipeDistance) {
+      // Swiped right = previous day
+      handlePrevDay();
+    }
+  };
+
+  // --- Finance Calculations ---
+  const monthFinances = finances.filter(f => {
+    const d = safeParseDate(f.date);
+    return d && d.getFullYear() === currentMonth.getFullYear() && d.getMonth() === currentMonth.getMonth();
+  });
+
+  const monthIncome = monthFinances
+    .filter(f => f.amount > 0)
+    .reduce((sum, f) => sum + f.amount, 0);
+
+  const monthExpense = monthFinances
+    .filter(f => f.amount < 0)
+    .reduce((sum, f) => sum + Math.abs(f.amount), 0);
+
+  const selectedDayIncome = selectedDateFinances
+    .filter(f => f.amount > 0)
+    .reduce((sum, f) => sum + f.amount, 0);
+
+  const selectedDayExpense = selectedDateFinances
+    .filter(f => f.amount < 0)
+    .reduce((sum, f) => sum + Math.abs(f.amount), 0);
+
+  const selectedDayTotal = selectedDateFinances.reduce((sum, f) => sum + f.amount, 0);
+
+  const expenseByCategory = monthFinances
+    .filter(f => f.amount < 0)
+    .reduce((acc, f) => {
+      const cat = f.category || 'その他';
+      acc[cat] = (acc[cat] || 0) + Math.abs(f.amount);
+      return acc;
+    }, {});
+
+  const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#a855f7', '#ec4899'];
+  const pieData = Object.keys(expenseByCategory).map(key => ({
+    name: key,
+    value: expenseByCategory[key]
+  }));
+
+  const barData = Array.from({ length: getDaysInMonth(currentMonth.getFullYear(), currentMonth.getMonth()) }, (_, i) => {
+    const day = i + 1;
+    const dayFinances = monthFinances.filter(f => {
+      const d = safeParseDate(f.date);
+      return d && d.getDate() === day;
+    });
+    const income = dayFinances.filter(f => f.amount > 0).reduce((sum, f) => sum + f.amount, 0);
+    const expense = dayFinances.filter(f => f.amount < 0).reduce((sum, f) => sum + Math.abs(f.amount), 0);
+    return {
+      date: String(day),
+      income,
+      expense
+    };
+  }).filter(d => d.income > 0 || d.expense > 0);
+
+  const categoryDetails = monthFinances.filter(f => f.category === selectedCategory && f.amount < 0);
+
+  const handlePieClick = (data) => {
+    if (data && data.name) {
+      setSelectedCategory(data.name);
+      setIsCategoryDetailOpen(true);
+    }
+  };
+
+  // --- Part-time Job Global ---
+  const currentMonthShifts = shifts.filter(s => {
+    const sDate = safeParseDate(s.startTime);
+    return sDate && sDate.getFullYear() === currentMonth.getFullYear() && sDate.getMonth() === currentMonth.getMonth();
+  });
+  const jobHoursMonth = currentMonthShifts.reduce((acc, s) => acc + s.workHours, 0);
+  const jobSalaryMonth = currentMonthShifts.reduce((acc, s) => acc + s.estimatedPay, 0);
+
+  // --- Share & Copy ---
+  const openShareModal = () => {
+    setIsShareSelectOpen(true);
+  };
+
+  const copySchedulesForWeek = (isNextWeek) => {
+    const curr = new Date(today);
+    // Calculate start of week (Monday)
+    const first = curr.getDate() - curr.getDay() + (curr.getDay() === 0 ? -6 : 1);
+    const startOfWeek = new Date(curr.setDate(first));
+    
+    if (isNextWeek) {
+      startOfWeek.setDate(startOfWeek.getDate() + 7);
+    }
+    
+    let text = isNextWeek ? '【来週の予定】\n\n' : '【今週の予定】\n\n';
+    
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(startOfWeek);
+      d.setDate(d.getDate() + i);
+      const daySchedules = getMergedSchedulesForDate(d);
+      if (daySchedules.length > 0) {
+        text += `■ ${d.getMonth() + 1}/${d.getDate()} (${weekdays[d.getDay()]})\n`;
+        daySchedules.forEach(s => {
+          text += `・${s.isSchool ? '🏫 ' : s.isWork ? '💼 ' : ''}${s.timeStart ? s.timeStart + '〜' : ''}${s.timeEnd || ''} ${s.title}\n`;
+        });
+        text += '\n';
+      }
+    }
+    
+    const shareContent = text.trim();
+    if (!shareContent) {
+      alert(isNextWeek ? '来週の予定はありません。' : '今週の予定はありません。');
+      setIsShareSelectOpen(false);
+      return;
+    }
+    
+    navigator.clipboard.writeText(shareContent)
+      .then(() => {
+        alert(isNextWeek ? '来週の予定をクリップボードにコピーしました！' : '今週の予定をクリップボードにコピーしました！');
+        setIsShareSelectOpen(false);
+      })
+      .catch(() => {
+        alert('コピーに失敗しました。');
+        setIsShareSelectOpen(false);
+      });
+  };
+  // --- Finance MoM Calculations ---
+  const prevMonthDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1);
+  const prevMonthFinances = finances.filter(f => {
+    const d = safeParseDate(f.date);
+    return d && d.getFullYear() === prevMonthDate.getFullYear() && d.getMonth() === prevMonthDate.getMonth();
+  });
+  const prevMonthIncome = prevMonthFinances.filter(f => f.amount > 0).reduce((sum, f) => sum + f.amount, 0);
+  const prevMonthExpense = prevMonthFinances.filter(f => f.amount < 0).reduce((sum, f) => sum + Math.abs(f.amount), 0);
+  const incomeDiff = monthIncome - prevMonthIncome;
+  const expenseDiff = monthExpense - prevMonthExpense;
+
+  if (!user) {
+    return (
+      <div className="auth-container">
+        <div className="auth-card">
+          <h1 className="auth-title">ライフOS</h1>
+          <p className="auth-subtitle">予定と収支をスマートに管理・共有</p>
+          
+          {authMode === 'forgot_password' ? (
+            <form onSubmit={handlePasswordResetSubmit} className="auth-form">
+              <label className="form-label">登録済みのメールアドレス</label>
+              <input 
+                type="email" 
+                className="select-input" 
+                placeholder="your@email.com" 
+                required 
+                value={authEmail} 
+                onChange={e => setAuthEmail(e.target.value)} 
+              />
+              
+              {authError && <div className="auth-error-msg">{authError}</div>}
+              {authSuccessMessage && <div className="auth-success-msg" style={{ color: 'var(--color-green)', fontSize: '0.85rem', marginBottom: '16px', lineHeight: '1.4', textAlign: 'center' }}>{authSuccessMessage}</div>}
+              
+              <button type="submit" className="btn-share-action" style={{ width: '100%', marginTop: '10px' }} disabled={authLoading}>
+                {authLoading ? '送信中...' : '再設定メールを送信'}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleAuthSubmit} className="auth-form">
+              <label className="form-label">メールアドレス</label>
+              <input 
+                type="email" 
+                className="select-input" 
+                placeholder="your@email.com" 
+                required 
+                value={authEmail} 
+                onChange={e => setAuthEmail(e.target.value)} 
+              />
+              
+              <label className="form-label">パスワード</label>
+              <input 
+                type="password" 
+                className="select-input" 
+                placeholder="••••••••" 
+                required 
+                value={authPassword} 
+                onChange={e => setAuthPassword(e.target.value)} 
+              />
+              
+              {authMode === 'register' && (
+                <>
+                  <label className="form-label">パスワード（確認用）</label>
+                  <input 
+                    type="password" 
+                    className="select-input" 
+                    placeholder="••••••••" 
+                    required 
+                    value={authConfirmPassword} 
+                    onChange={e => setAuthConfirmPassword(e.target.value)} 
+                  />
+                </>
+              )}
+              
+              {authError && <div className="auth-error-msg">{authError}</div>}
+              
+              <button type="submit" className="btn-share-action" style={{ width: '100%', marginTop: '10px' }} disabled={authLoading}>
+                {authLoading ? '送信中...' : authMode === 'login' ? 'ログイン' : '新規アカウント作成'}
+              </button>
+            </form>
+          )}
+          
+          <div className="auth-toggle">
+            {authMode === 'login' ? (
+              <>
+                <p>アカウントをお持ちでないですか？ <span onClick={() => { setAuthMode('register'); setAuthError(''); setAuthPassword(''); setAuthConfirmPassword(''); setAuthSuccessMessage(''); }}>新規登録</span></p>
+                <p style={{ marginTop: '12px' }}><span style={{ color: 'var(--primary-color)', cursor: 'pointer', fontSize: '0.9rem' }} onClick={() => { setAuthMode('forgot_password'); setAuthError(''); setAuthPassword(''); setAuthConfirmPassword(''); setAuthSuccessMessage(''); }}>パスワードを忘れた場合</span></p>
+              </>
+            ) : authMode === 'register' ? (
+              <p>既にアカウントをお持ちですか？ <span onClick={() => { setAuthMode('login'); setAuthError(''); setAuthPassword(''); setAuthConfirmPassword(''); setAuthSuccessMessage(''); }}>ログイン</span></p>
+            ) : (
+              <p><span style={{ color: 'var(--primary-color)', cursor: 'pointer', fontSize: '0.9rem' }} onClick={() => { setAuthMode('login'); setAuthError(''); setAuthPassword(''); setAuthConfirmPassword(''); setAuthSuccessMessage(''); }}>ログイン画面に戻る</span></p>
+            )}
+          </div>
+        </div>
       </div>
-    </div>
-  );
+    );
+  }
 
   return (
     <div className="app-container">
-      {/* ヘッダーエリア */}
       <header className="header">
-        <h1 className="title">Life OS</h1>
-        
-        {/* タブ切り替えUI */}
-        <div className="tabs">
-          <button 
-            className={`tab-btn ${activeTab === 'schedule' ? 'active' : ''}`}
-            onClick={() => setActiveTab('schedule')}
-          >
-            予定
-          </button>
-          <button 
-            className={`tab-btn ${activeTab === 'finance' ? 'active' : ''}`}
-            onClick={() => setActiveTab('finance')}
-          >
-            収支
-          </button>
+        <div className="header-top">
+          <h1 className="title">
+            {currentBottomTab === 'memo' ? 'メモ' : currentBottomTab === 'settings' ? '設定' : 'ライフOS'}
+          </h1>
+          <div className="header-actions">
+            {currentBottomTab !== 'settings' && currentBottomTab !== 'memo' && (
+              <>
+                <button className="btn-header btn-share" onClick={openShareModal}><span>📤</span> 共有</button>
+                <button className="btn-header" onClick={() => signOut(auth)}>ログアウト</button>
+              </>
+            )}
+          </div>
         </div>
+        {currentBottomTab !== 'settings' && currentBottomTab !== 'memo' && (
+          <div className="tabs">
+            <button className={`tab-btn ${activeTopTab === 'schedule' ? 'active' : ''}`} onClick={() => { setActiveTopTab('schedule'); setCurrentBottomTab('calendar'); }}>予定</button>
+            <button className={`tab-btn ${activeTopTab === 'finance' ? 'active' : ''}`} onClick={() => { setActiveTopTab('finance'); setCurrentBottomTab('finance'); }}>収支</button>
+          </div>
+        )}
       </header>
 
-      {/* コンテンツエリア */}
       <main className="content-area">
-        
-        {/* === 予定タブ === */}
-        {activeTab === 'schedule' && (
-          <div className="tab-content">
-            
-            {renderCalendar('schedule')}
+        {/* === Calendar Screen (calendar or finance tab) === */}
+        {(currentBottomTab === 'calendar' || currentBottomTab === 'finance') && (
+          <>
+            {/* === Today's Schedule Specific Top Area (Detail List) === */}
+            {activeTopTab === 'schedule' && (
+              <>
+                <div 
+                  className="detail-list-container"
+                  onTouchStart={handleTouchStart}
+                  onTouchMove={handleTouchMove}
+                  onTouchEnd={handleTouchEnd}
+                >
+                  <div className="detail-list-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <button className="btn-day-nav" onClick={handlePrevDay}>&lt;</button>
+                      <div className="detail-list-title">
+                        {selectedDate.getMonth() + 1}/{selectedDate.getDate()} ({weekdays[selectedDate.getDay()]})
+                      </div>
+                      <button className="btn-day-nav" onClick={handleNextDay}>&gt;</button>
+                      {isSameDay(selectedDate, today) && (
+                        <span className="today-badge" style={{ backgroundColor: 'rgba(255,255,255,0.1)', color: 'var(--text-secondary)', fontSize: '0.75rem', padding: '2px 8px', borderRadius: '12px', marginLeft: '4px' }}>今日</span>
+                      )}
+                    </div>
+                    <button className="btn-today-small" onClick={() => setSelectedDate(new Date())}>今日</button>
+                  </div>
+                  <div className="detail-list-subtitle">今日の予定</div>
+                  
+                  <div className="detail-list">
+                    {selectedDateSchedules.length > 0 ? (
+                      selectedDateSchedules.map(s => {
+                        const isSchool = s.isSchool || s.title.includes('学校') || s.title.includes('授業');
+                        const isJob = s.title.includes('バイト') || s.title.includes('アルバイト') || s.isWork;
+                        const duration = s.isWork ? s.workHours : (isJob ? calculateDuration(s.timeStart, s.timeEnd) : 0);
+                        const salary = s.isWork ? s.estimatedPay : (isJob ? Math.floor(duration * hourlyWage) : 0);
+                        
+                        return (
+                          <div key={s.id} className="detail-item">
+                            <div className="detail-item-color" style={{ backgroundColor: s.color }}></div>
+                            <div className="detail-item-time">
+                              <span>{s.timeStart}</span>
+                              {s.timeEnd && <span style={{ opacity: 0.6 }}> - {s.timeEnd}</span>}
+                            </div>
+                            <div className="detail-item-title" style={{ cursor: 'pointer' }} onClick={() => {
+                              if (s.isSchool) {
+                                window.location.href = 'http://localhost:5174/?tab=school';
+                              } else if (s.isWork) {
+                                window.location.href = 'http://localhost:5174/?tab=work';
+                              } else {
+                                setSelectedDate(parseDate(s.date)); 
+                                setDetailTab('schedule'); 
+                                setIsDailyDetailOpen(true);
+                              }
+                            }}>
+                              {isSchool ? '🏫 ' : isJob ? '💼 ' : ''}{s.title}
+                            </div>
+                            {isJob && (
+                              <div className="detail-item-inline-salary">
+                                {duration.toFixed(1)}時間 / ¥{salary.toLocaleString()}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div style={{ color: 'var(--text-secondary)', padding: '10px 0', fontSize: '0.9rem' }}>予定はありません</div>
+                    )}
+                    
+                    <div className="btn-detail-add" onClick={() => openAddModal('schedule')}>
+                      <span style={{ fontSize: '1.2rem', color: 'var(--primary-color)' }}>+</span> ここに予定を追加
+                    </div>
+                  </div>
+                  
+                  <div className="detail-view-all" onClick={() => { setDetailTab('schedule'); setIsDailyDetailOpen(true); }}>
+                    <span>すべての予定を見る</span>
+                    <span>&gt;</span>
+                  </div>
+                </div>
 
-            {/* 選択日のスケジュール */}
-            <h2 className="selected-date-header">
-              <span style={{ color: '#3b82f6' }}>•</span> {formatDateString(selectedDate)}
-            </h2>
-            
-            <div className="schedule-list">
-              {selectedDateSchedules.length > 0 ? (
-                selectedDateSchedules.map(item => (
-                  <div key={item.id} className="card">
-                    <div className="color-dot" style={{ backgroundColor: item.color || '#3b82f6' }}></div>
-                    <div className="time-column">
-                      <span>{item.timeStart}</span>
-                      <span style={{ fontSize: '0.75rem', opacity: 0.6 }}>{item.timeEnd}</span>
+                {/* Part-time Job Tracker Card */}
+                <div className="job-card">
+                  <div className="job-card-header"><div>今月のバイト合計</div><div>({currentMonth.getMonth() + 1}月)</div></div>
+                  <div className="job-card-body">
+                    <div className="job-card-hours">{jobHoursMonth.toFixed(1)} <span>時間</span></div>
+                    <div className="job-card-salary">¥{jobSalaryMonth.toLocaleString()}</div>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* === Unified Calendar View === */}
+            <div className="calendar-container">
+              <div className="calendar-header">
+                <button className="nav-btn" onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))}>&lt;</button>
+                <div className="month-title">{currentMonth.getFullYear()}年 {currentMonth.getMonth() + 1}月</div>
+                <button className="nav-btn" onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))}>&gt;</button>
+              </div>
+              
+              <div className="weekdays">
+                {weekdays.map((day, idx) => (<div key={day} className={`weekday ${idx === 0 ? 'weekday-sun' : idx === 6 ? 'weekday-sat' : ''}`}>{day}</div>))}
+              </div>
+              
+              <div className="days-grid">
+                {calendarDays.map((dayObj, idx) => {
+                  const isSelected = isSameDay(dayObj.date, selectedDate);
+                  const isToday = isSameDay(dayObj.date, today);
+                  
+                  return (
+                    <div 
+                      key={idx} 
+                      className={`day-cell ${!dayObj.isCurrentMonth ? 'other-month' : ''} ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''}`}
+                      onClick={() => {
+                        setSelectedDate(dayObj.date);
+                        openAddModal(activeTopTab === 'finance' ? 'expense' : 'schedule', '', '', dayObj.date);
+                      }}
+                    >
+                      <div className="date-number">{dayObj.date.getDate()}</div>
+                      
+                      {/* Render Schedule Chips */}
+                      {activeTopTab === 'schedule' && (
+                        <div className="event-chips-container">
+                          {getMergedSchedulesForDate(dayObj.date).slice(0, 2).map((s, i) => {
+                            const isSchool = s.isSchool || s.title.includes('学校') || s.title.includes('授業');
+                            const isWork = s.isWork || s.title.includes('バイト') || s.title.includes('アルバイト');
+                            return (
+                              <div key={i} className="event-chip" style={{ backgroundColor: s.color }}>
+                                {isSchool ? '🏫 ' : isWork ? '💼 ' : ''}{s.title}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Render Finance Totals */}
+                      {activeTopTab === 'finance' && (
+                        <div className="event-chips-container" style={{ marginTop: 'auto' }}>
+                          {(() => {
+                            const dayFins = finances.filter(f => isSameDay(f.date, dayObj.date));
+                            const total = dayFins.reduce((a,b) => a + b.amount, 0);
+                            if (total === 0) return null;
+                            return (
+                              <div className={`finance-amount ${total > 0 ? 'plus' : 'minus'}`}>
+                                {total > 0 ? '+' : ''}{total.toLocaleString()}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
                     </div>
-                    <div className="card-content">
-                      <div className="card-title">{item.title}</div>
-                      {item.location && <div className="card-subtitle">📍 {item.location}</div>}
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* === Finance Specific Bottom Area (Screen 4) === */}
+            {activeTopTab === 'finance' && (
+              <div className="finance-dashboard">
+                <div className="calendar-header" style={{ border: 'none', background: 'transparent', padding: '0 4px', marginBottom: '16px' }}>
+                  <button className="nav-btn" onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))}>&lt;</button>
+                  <div className="month-title">{currentMonth.getFullYear()}年 {currentMonth.getMonth() + 1}月</div>
+                  <button className="nav-btn" onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))}>&gt;</button>
+                </div>
+
+                <div className="finance-summary-cards">
+                  <div className="finance-card">
+                    <div className="finance-card-label">収入</div>
+                    <div className="finance-card-value income">¥{monthIncome.toLocaleString()}</div>
+                    <div className={`finance-mom ${incomeDiff >= 0 ? 'mom-plus' : 'mom-minus'}`} style={{ fontSize: '0.75rem', marginTop: '6px', fontWeight: 'bold' }}>
+                      前月比: {incomeDiff >= 0 ? '+' : ''}{incomeDiff.toLocaleString()}円
                     </div>
-                    <button className="btn-delete" onClick={() => handleDeleteSchedule(item.id)}>
-                      ×
-                    </button>
+                  </div>
+                  <div className="finance-card">
+                    <div className="finance-card-label">支出</div>
+                    <div className="finance-card-value expense">-¥{monthExpense.toLocaleString()}</div>
+                    <div className={`finance-mom ${expenseDiff <= 0 ? 'mom-plus' : 'mom-minus'}`} style={{ fontSize: '0.75rem', marginTop: '6px', fontWeight: 'bold' }}>
+                      前月比: {expenseDiff > 0 ? '+' : ''}{expenseDiff.toLocaleString()}円
+                    </div>
+                  </div>
+                </div>
+
+                <div className="chart-section">
+                  <div className="chart-title">支出カテゴリ別割合</div>
+                  <div style={{ height: 200 }}>
+                    {pieData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie data={pieData} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value" onClick={handlePieClick} style={{ cursor: 'pointer' }}>
+                            {pieData.map((entry, index) => (<Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />))}
+                          </Pie>
+                          <Tooltip formatter={(value) => `¥${value.toLocaleString()}`} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    ) : ( <div style={{ display:'flex', height:'100%', alignItems:'center', justifyContent:'center', color:'var(--text-secondary)'}}>データがありません</div> )}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '16px' }}>
+                    {pieData.map((entry, idx) => (
+                      <div key={idx} style={{ display: 'flex', alignItems: 'center', fontSize: '0.85rem' }}>
+                        <div style={{ width: 10, height: 10, borderRadius: '50%', backgroundColor: COLORS[idx % COLORS.length], marginRight: 8 }}></div>
+                        <span style={{ flex: 1 }}>{entry.name}</span>
+                        <span style={{ color: 'var(--text-secondary)' }}>¥{entry.value.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="chart-section">
+                  <div className="chart-title">日別収支グラフ</div>
+                  <div style={{ height: 200 }}>
+                    {barData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={barData}>
+                          <XAxis dataKey="date" tick={{fill: 'var(--text-secondary)', fontSize: 10}} axisLine={false} tickLine={false} />
+                          <Tooltip cursor={{fill: 'rgba(255,255,255,0.1)'}} contentStyle={{backgroundColor: '#1a1d24', border: 'none', borderRadius: '8px'}} />
+                          <Bar dataKey="income" fill="var(--primary-color)" radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="expense" fill="var(--color-red)" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : ( <div style={{ display:'flex', height:'100%', alignItems:'center', justifyContent:'center', color:'var(--text-secondary)'}}>データがありません</div> )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* === Memo Screen === */}
+        {currentBottomTab === 'memo' && (
+          <div className="memo-screen">
+            <div className="memo-composer">
+              <textarea 
+                className="memo-textarea" 
+                placeholder="ここにメモを入力..." 
+                value={memoInput}
+                onChange={e => setMemoInput(e.target.value)}
+              />
+              <div className="memo-btn-row">
+                <button 
+                  className="btn-share-action" 
+                  style={{ padding: '8px 20px', borderRadius: '10px' }}
+                  onClick={async () => {
+                    if (!memoInput.trim()) return;
+                    if (user) {
+                      try {
+                        await addDoc(collection(db, 'users', user.uid, 'memos'), {
+                          text: memoInput,
+                          dateStr: new Date().toLocaleString('ja-JP'),
+                          createdAt: new Date().toISOString()
+                        });
+                        setMemoInput('');
+                      } catch (err) {
+                        console.error(err);
+                        alert('メモの保存に失敗しました。');
+                      }
+                    } else {
+                      const newMemos = [{
+                        id: Date.now(),
+                        text: memoInput,
+                        dateStr: new Date().toLocaleString('ja-JP')
+                      }, ...memos];
+                      setMemos(newMemos);
+                      localStorage.setItem('lifeos_memos', JSON.stringify(newMemos));
+                      setMemoInput('');
+                    }
+                  }}
+                >
+                  保存する
+                </button>
+              </div>
+            </div>
+
+            <div className="memo-list">
+              {memos.length > 0 ? (
+                memos.map(m => (
+                  <div key={m.id} className="memo-card">
+                    <div className="memo-card-text">{m.text}</div>
+                    <div className="memo-card-footer">
+                      <span>{m.dateStr}</span>
+                      <button className="btn-memo-delete" onClick={async () => {
+                        if (confirm('このメモを削除しますか？')) {
+                          if (user) {
+                            try {
+                              await deleteDoc(doc(db, 'users', user.uid, 'memos', m.id));
+                            } catch (err) {
+                              console.error(err);
+                              alert('削除に失敗しました。');
+                            }
+                          } else {
+                            const newMemos = memos.filter(item => item.id !== m.id);
+                            setMemos(newMemos);
+                            localStorage.setItem('lifeos_memos', JSON.stringify(newMemos));
+                          }
+                        }
+                      }}>
+                        削除
+                      </button>
+                    </div>
                   </div>
                 ))
               ) : (
-                <div className="empty-state">
-                  <div style={{ fontSize: '2.5rem', margin: '0 auto 12px', opacity: 0.8 }}>☕️</div>
-                  <p style={{ fontWeight: 'bold' }}>予定なし</p>
-                  <p style={{ fontSize: '0.85rem', marginTop: '4px', opacity: 0.6 }}>カレンダーの日付をタップして追加</p>
-                </div>
+                <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '40px 0' }}>メモはありません</div>
               )}
             </div>
           </div>
         )}
 
-        {/* === 収支タブ === */}
-        {activeTab === 'finance' && (
-          <div className="tab-content">
-            
-            {renderCalendar('finance')}
-
-            <h2 className="selected-date-header">
-              <span style={{ color: '#10b981' }}>•</span> 今月の収支状況
-            </h2>
-            
-            <div className="finance-summary">
-              <div className="summary-box">
-                <div className="summary-label">今日の支出</div>
-                <div className="summary-amount" style={{ color: '#ef4444' }}>
-                  {todayExpense === 0 ? '¥0' : `-¥${Math.abs(todayExpense).toLocaleString()}`}
+        {/* === Settings Screen === */}
+        {currentBottomTab === 'settings' && (
+          <div className="settings-screen">
+            <div className="settings-list">
+              <button className="settings-item">
+                <div className="settings-item-left">
+                  <span className="settings-item-icon">👤</span>
+                  <span>アカウント設定</span>
                 </div>
-              </div>
-              <div className="summary-box">
-                <div className="summary-label">今月の支出合計</div>
-                <div className="summary-amount">
-                  {monthExpense === 0 ? '¥0' : `-¥${Math.abs(monthExpense).toLocaleString()}`}
+                <span className="settings-item-chevron">&gt;</span>
+              </button>
+              <button className="settings-item">
+                <div className="settings-item-left">
+                  <span className="settings-item-icon">🔔</span>
+                  <span>通知設定</span>
                 </div>
-              </div>
-            </div>
-
-            <h3 style={{ fontSize: '1rem', marginBottom: '12px', color: '#94a3b8' }}>{selectedDate.getDate()}日の履歴</h3>
-            <div className="finance-list">
-              {selectedDateFinances.length > 0 ? (
-                selectedDateFinances.map(item => (
-                  <div key={item.id} className="card">
-                    <div className="card-content">
-                      <div className="card-title">{item.title}</div>
-                      <div className="card-subtitle">{item.category} • {item.time}</div>
-                    </div>
-                    <div className={item.amount < 0 ? "expense-amount" : "income-amount"}>
-                      {item.amount > 0 ? '+' : ''}{item.amount.toLocaleString()}円
-                    </div>
-                    <button className="btn-delete" onClick={() => handleDeleteFinance(item.id)}>
-                      ×
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <div className="empty-state">
-                  <div style={{ fontSize: '2.5rem', margin: '0 auto 12px', opacity: 0.8 }}>👛</div>
-                  <p style={{ fontWeight: 'bold' }}>履歴なし</p>
-                  <p style={{ fontSize: '0.85rem', marginTop: '4px', opacity: 0.6 }}>カレンダーの日付をタップして追加</p>
+                <span className="settings-item-chevron">&gt;</span>
+              </button>
+              <button className="settings-item" onClick={() => setIsDataManagementOpen(true)}>
+                <div className="settings-item-left">
+                  <span className="settings-item-icon">💾</span>
+                  <span>データ管理</span>
                 </div>
-              )}
+                <span className="settings-item-chevron">&gt;</span>
+              </button>
+              <button className="settings-item">
+                <div className="settings-item-left">
+                  <span className="settings-item-icon">🎨</span>
+                  <span>外観設定</span>
+                </div>
+                <span className="settings-item-chevron">&gt;</span>
+              </button>
+              <button className="settings-item">
+                <div className="settings-item-left">
+                  <span className="settings-item-icon">❔</span>
+                  <span>サポート</span>
+                </div>
+                <span className="settings-item-chevron">&gt;</span>
+              </button>
+              <button className="settings-item" onClick={() => setIsUpdateCacheOpen(true)}>
+                <div className="settings-item-left">
+                  <span className="settings-item-icon">🔄</span>
+                  <span>アプリ更新・キャッシュ</span>
+                </div>
+                <span className="settings-item-chevron">&gt;</span>
+              </button>
             </div>
           </div>
         )}
       </main>
 
-      {/* ＋ボタン */}
-      <button className="fab" aria-label="追加" onClick={() => setIsModalOpen(true)}>
-        ＋
-      </button>
+      {currentBottomTab !== 'settings' && currentBottomTab !== 'memo' && (
+        <button className="fab" onClick={() => openAddModal(activeTopTab === 'finance' ? 'expense' : 'schedule')}>＋</button>
+      )}
 
-      {/* 統合入力モーダル */}
-      {isModalOpen && (
-        <div className="modal-overlay" onClick={() => { setIsModalOpen(false); resetForm(); }}>
+      {/* Bottom Navigation */}
+      <nav className="bottom-nav">
+        <button className={`nav-item ${currentBottomTab === 'calendar' ? 'active' : ''}`} onClick={() => setCurrentBottomTab('calendar')}><div className="nav-icon">📅</div><span>カレンダー</span></button>
+        <button className={`nav-item ${currentBottomTab === 'finance' ? 'active' : ''}`} onClick={() => setCurrentBottomTab('finance')}><div className="nav-icon">💰</div><span>収支</span></button>
+        <button className={`nav-item ${currentBottomTab === 'memo' ? 'active' : ''}`} onClick={() => setCurrentBottomTab('memo')}><div className="nav-icon">📝</div><span>メモ</span></button>
+        <button className={`nav-item ${currentBottomTab === 'settings' ? 'active' : ''}`} onClick={() => setCurrentBottomTab('settings')}><div className="nav-icon">⚙️</div><span>設定</span></button>
+      </nav>
+
+      {/* Modals */}
+      {isAddModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsAddModalOpen(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h3 className="modal-title">新しく追加 ({selectedDate.getDate()}日)</h3>
-              <button className="btn-close" onClick={() => { setIsModalOpen(false); resetForm(); }}>&times;</button>
+              <div className="modal-title">新しく追加</div>
+              <button className="btn-close" onClick={() => setIsAddModalOpen(false)}>&times;</button>
             </div>
             
-            <div className="modal-type-selector">
-              <button 
-                className={`type-btn ${modalType === 'schedule' ? 'active' : ''}`}
-                onClick={() => setModalType('schedule')}
-              >予定</button>
-              <button 
-                className={`type-btn ${modalType === 'expense' ? 'active' : ''}`}
-                onClick={() => setModalType('expense')}
-              >支出</button>
-              <button 
-                className={`type-btn ${modalType === 'income' ? 'active' : ''}`}
-                onClick={() => setModalType('income')}
-              >収入</button>
+            <div className="modal-date-picker">
+              <span style={{color: 'var(--text-secondary)', fontSize: '0.9rem'}}>日付</span>
+              <input type="date" value={formData.dateStr} onChange={e => setFormData({...formData, dateStr: e.target.value})} />
+              <button className="btn-modal-today" onClick={() => setFormData({...formData, dateStr: formatDateForInput(today)})}>今日</button>
             </div>
 
-            {/* 予定入力フォーム */}
-            {modalType === 'schedule' && (
+            <div className="tabs" style={{ marginBottom: '20px' }}>
+              <button className={`tab-btn ${addModalType === 'schedule' ? 'active' : ''}`} onClick={() => setAddModalType('schedule')}>予定</button>
+              <button className={`tab-btn ${addModalType === 'expense' ? 'active' : ''}`} onClick={() => setAddModalType('expense')}>支出</button>
+              <button className={`tab-btn ${addModalType === 'income' ? 'active' : ''}`} onClick={() => setAddModalType('income')}>収入</button>
+            </div>
+
+            {addModalType === 'schedule' && (
               <form onSubmit={handleScheduleSubmit}>
-                <div className="input-group">
-                  <label>タイトル</label>
-                  <input 
-                    type="text" 
-                    className="form-input" 
-                    placeholder="例: バイト、ゼミ" 
-                    required 
-                    value={formData.title}
-                    onChange={(e) => setFormData({...formData, title: e.target.value})}
-                  />
-                </div>
+                <label className="form-label">タイトル</label>
+                <input type="text" className="select-input" placeholder="例: バイト、ゼミ" required value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} />
+                
+                <label className="form-label">場所（任意）</label>
+                <input type="text" className="select-input" placeholder="例: 101教室、店舗名など" value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})} />
+                
                 <div style={{ display: 'flex', gap: '12px' }}>
-                  <div className="input-group" style={{ flex: 1 }}>
-                    <label>開始時間</label>
-                    <input 
-                      type="time" 
-                      className="form-input"
-                      value={formData.timeStart}
-                      onChange={(e) => setFormData({...formData, timeStart: e.target.value})}
-                    />
-                  </div>
-                  <div className="input-group" style={{ flex: 1 }}>
-                    <label>終了時間</label>
-                    <input 
-                      type="time" 
-                      className="form-input"
-                      value={formData.timeEnd}
-                      onChange={(e) => setFormData({...formData, timeEnd: e.target.value})}
-                    />
-                  </div>
+                  <div style={{flex: 1}}><label className="form-label">開始時間</label><input type="time" className="select-input" value={formData.timeStart} onChange={e => setFormData({...formData, timeStart: e.target.value})} /></div>
+                  <div style={{flex: 1}}><label className="form-label">終了時間</label><input type="time" className="select-input" value={formData.timeEnd} onChange={e => setFormData({...formData, timeEnd: e.target.value})} /></div>
                 </div>
-                <div className="input-group">
-                  <label>色</label>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    {['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6'].map(color => (
-                      <div 
-                        key={color}
-                        onClick={() => setFormData({...formData, color})}
-                        style={{
-                          width: '32px', height: '32px', borderRadius: '50%', backgroundColor: color,
-                          cursor: 'pointer', border: formData.color === color ? '2px solid white' : '2px solid transparent',
-                          boxShadow: formData.color === color ? '0 0 0 2px var(--primary-color)' : 'none'
-                        }}
-                      />
-                    ))}
-                  </div>
+
+                <label className="form-label">繰り返し登録</label>
+                <select className="select-input" value={formData.recurring} onChange={e => setFormData({...formData, recurring: e.target.value})}>
+                  <option value="none">なし（今回のみ）</option>
+                  <option value="daily">毎日</option>
+                  <option value="weekly">毎週 (曜日を選択)</option>
+                  <option value="monthly">毎月 (毎月〇日)</option>
+                  <option value="yearly">毎年 (毎年〇月〇日)</option>
+                </select>
+
+                {formData.recurring === 'weekly' && (
+                  <>
+                    <label className="form-label">繰り返し設定</label>
+                    <div className="weekday-selector">
+                      {weekdays.map((day, idx) => {
+                        const isActive = selectedWeekdays.includes(idx);
+                        return (
+                          <div 
+                            key={idx} 
+                            className={`weekday-circle ${isActive ? 'active' : ''}`}
+                            onClick={() => {
+                              if (isActive) {
+                                setSelectedWeekdays(selectedWeekdays.filter(d => d !== idx));
+                              } else {
+                                setSelectedWeekdays([...selectedWeekdays, idx]);
+                              }
+                            }}
+                          >
+                            {day}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+
+                {formData.recurring !== 'none' && (
+                  <>
+                    <label className="form-label">終了設定</label>
+                    <select className="select-input" value={endSetting} onChange={e => setEndSetting(e.target.value)}>
+                      <option value="forever">終了日なし (最大5回登録)</option>
+                      <option value="date">日付で指定</option>
+                    </select>
+
+                    {endSetting === 'date' && (
+                      <div className="modal-date-picker" style={{ marginTop: '-8px', marginBottom: '16px' }}>
+                        <span style={{color: 'var(--text-secondary)', fontSize: '0.9rem'}}>終了日</span>
+                        <input type="date" value={endSettingDate} onChange={e => setEndSettingDate(e.target.value)} />
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <label className="form-label">色</label>
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
+                  {['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#a855f7'].map(color => (
+                    <div key={color} onClick={() => setFormData({...formData, color})} style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: color, cursor: 'pointer', border: formData.color === color ? '2px solid white' : 'none' }} />
+                  ))}
                 </div>
-                <button type="submit" className="btn-primary">予定を追加</button>
+                <button type="submit" className="btn-share-action" style={{ width: '100%' }}>予定を追加</button>
               </form>
             )}
 
-            {/* 支出・収入入力フォーム */}
-            {(modalType === 'expense' || modalType === 'income') && (
+            {(addModalType === 'expense' || addModalType === 'income') && (
               <form onSubmit={handleFinanceSubmit}>
-                <div className="input-group">
-                  <label>金額 (円)</label>
-                  <input 
-                    type="number" 
-                    className="form-input" 
-                    placeholder="0" 
-                    required 
-                    value={formData.amount}
-                    onChange={(e) => setFormData({...formData, amount: e.target.value})}
-                  />
-                </div>
-                <div className="input-group">
-                  <label>カテゴリ（任意）</label>
-                  <input 
-                    type="text" 
-                    className="form-input" 
-                    placeholder="例: 食費、給料 (空欄でOK)" 
-                    value={formData.category}
-                    onChange={(e) => setFormData({...formData, category: e.target.value})}
-                  />
-                </div>
-                <button type="submit" className="btn-primary" style={{ backgroundColor: modalType === 'expense' ? '#ef4444' : '#10b981' }}>
-                  {modalType === 'expense' ? '支出を記録' : '収入を記録'}
+                <label className="form-label">金額 (円)</label>
+                <input type="number" className="select-input" placeholder="0" required value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} />
+                <label className="form-label">内容</label>
+                <input type="text" className="select-input" placeholder="例: コンビニ、給料" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} />
+                <label className="form-label">カテゴリ</label>
+                <select className="select-input" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})}>
+                  <option value="">選択してください</option>
+                  {addModalType === 'expense' ? (
+                    <>
+                      <option value="食費">食費</option>
+                      <option value="交通費">交通費</option>
+                      <option value="日用品">日用品</option>
+                      <option value="娯楽">娯楽</option>
+                      <option value="その他">その他</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="給料">給料</option>
+                      <option value="お小遣い">お小遣い</option>
+                      <option value="その他">その他</option>
+                    </>
+                  )}
+                </select>
+                <button type="submit" className="btn-share-action" style={{ width: '100%', backgroundColor: addModalType === 'expense' ? 'var(--color-red)' : 'var(--primary-color)' }}>
+                  {addModalType === 'expense' ? '支出を記録' : '収入を記録'}
                 </button>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* --- Daily Detail Slide Panel (Dual Tab: 予定 & 収支) --- */}
+      {isDailyDetailOpen && (
+        <div 
+          className="slide-panel-overlay"
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        >
+          <div className="slide-panel-header">
+            <button className="btn-back" onClick={() => setIsDailyDetailOpen(false)}><span>&lt;</span></button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button className="btn-day-nav" onClick={handlePrevDay}>&lt;</button>
+              <div className="slide-panel-title">
+                {selectedDate.getFullYear()}年{selectedDate.getMonth() + 1}/{selectedDate.getDate()} ({weekdays[selectedDate.getDay()]})
+              </div>
+              <button className="btn-day-nav" onClick={handleNextDay}>&gt;</button>
+            </div>
+            <div style={{ width: '32px' }}></div>
+          </div>
+          <div className="slide-panel-content">
+            <div className="detail-tab-row">
+              <button className={`detail-tab-btn ${detailTab === 'schedule' ? 'active' : ''}`} onClick={() => setDetailTab('schedule')}>予定</button>
+              <button className={`detail-tab-btn ${detailTab === 'finance' ? 'active' : ''}`} onClick={() => setDetailTab('finance')}>収支</button>
+            </div>
+
+            {detailTab === 'schedule' && (
+              <>
+                <div style={{ marginBottom: '16px' }}>
+                  <input 
+                    type="text" 
+                    placeholder="予定を検索 (例: バイト)..." 
+                    className="select-input" 
+                    style={{ marginBottom: '8px' }}
+                    value={scheduleSearchQuery} 
+                    onChange={e => setScheduleSearchQuery(e.target.value)} 
+                  />
+                  {scheduleSearchQuery && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px' }}>
+                      <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                        検索結果: {
+                          schedules.filter(s => s.title.toLowerCase().includes(scheduleSearchQuery.toLowerCase())).length
+                        } 件
+                      </span>
+                      {schedules.filter(s => s.title.toLowerCase().includes(scheduleSearchQuery.toLowerCase())).length > 0 && (
+                        <button 
+                          className="btn-memo-delete" 
+                          style={{ fontSize: '0.85rem', padding: '4px 10px', background: 'rgba(248, 113, 113, 0.1)', borderRadius: '6px' }}
+                          onClick={() => {
+                            const matching = schedules.filter(s => s.title.toLowerCase().includes(scheduleSearchQuery.toLowerCase()));
+                            if (confirm(`「${scheduleSearchQuery}」を含むすべての予定（${matching.length}件）を一括削除しますか？`)) {
+                              const matchingIds = matching.map(s => s.id);
+                              setSchedules(schedules.filter(s => !matchingIds.includes(s.id)));
+                              alert('削除が完了しました。');
+                            }
+                          }}
+                        >
+                          検索結果を一括削除
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="ledger-list" style={{ marginTop: 0 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <div style={{ fontSize: '0.95rem', fontWeight: 'bold' }}>
+                      {scheduleSearchQuery ? `「${scheduleSearchQuery}」の検索結果` : `${currentMonth.getMonth() + 1}月の予定一覧`}
+                    </div>
+                  </div>
+                  {(() => {
+                    const listItems = scheduleSearchQuery 
+                      ? schedules
+                          .filter(s => s.title.toLowerCase().includes(scheduleSearchQuery.toLowerCase()))
+                          .sort((a, b) => a.date.localeCompare(b.date) || (a.timeStart || '').localeCompare(b.timeStart || ''))
+                      : schedules
+                          .filter(s => {
+                            const d = safeParseDate(s.date);
+                            return d && d.getFullYear() === currentMonth.getFullYear() && d.getMonth() === currentMonth.getMonth();
+                          })
+                          .sort((a, b) => a.date.localeCompare(b.date) || (a.timeStart || '').localeCompare(b.timeStart || ''));
+
+                    return listItems.length > 0 ? (
+                      listItems.map((s) => {
+                        const sDate = safeParseDate(s.date) || new Date();
+                        const isSchool = s.isSchool || s.title.includes('学校') || s.title.includes('授業');
+                        const isJob = s.title.includes('バイト') || s.title.includes('アルバイト') || s.isWork;
+                        const duration = isJob ? calculateDuration(s.timeStart, s.timeEnd) : 0;
+                        const salary = isJob ? Math.floor(duration * hourlyWage) : 0;
+                        return (
+                          <div key={s.id} className="ledger-item">
+                            <div className="ledger-item-left">
+                              <div className="ledger-item-dot" style={{ backgroundColor: s.color }}></div>
+                              <div className="ledger-item-info">
+                                <div className="ledger-item-title">
+                                  {isSchool ? '🏫 ' : isJob ? '💼 ' : ''}{s.title}
+                                </div>
+                                <div className="ledger-item-subtitle">
+                                  {sDate.getMonth() + 1}/{sDate.getDate()}({weekdays[sDate.getDay()]}) • {s.timeStart}{s.timeEnd && ` - ${s.timeEnd}`}
+                                  {s.location && ` • 場所: ${s.location}`}
+                                  {s.recurringPattern && ` (繰り返し: ${s.recurringPattern === 'daily' ? '毎日' : s.recurringPattern === 'weekly' ? '毎週' : s.recurringPattern === 'monthly' ? '毎月' : '毎年'})`}
+                                </div>
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                              {isJob && (
+                                <span style={{ fontSize: '0.85rem', color: 'var(--color-green)', fontWeight: 'bold', marginRight: '4px' }}>
+                                  ¥{salary.toLocaleString()}
+                                </span>
+                              )}
+                              <button className="btn-memo-delete" onClick={() => deleteSchedule(s.id)}>削除</button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="empty-state" style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                        予定はありません
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Monthly Job Total Card */}
+                <div className="job-card" style={{ marginTop: '24px' }}>
+                  <div className="job-card-header"><div>今月のバイト合計 ({currentMonth.getMonth() + 1}月)</div></div>
+                  <div className="job-card-body">
+                    <div className="job-card-hours">{jobHoursMonth.toFixed(1)} <span>時間</span></div>
+                    <div className="job-card-salary">¥{jobSalaryMonth.toLocaleString()}</div>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {detailTab === 'finance' && (
+              <>
+                <div className="finance-summary-cards">
+                  <div className="finance-card"><div className="finance-card-label">収入</div><div className="finance-card-value income">+{selectedDayIncome.toLocaleString()}</div></div>
+                  <div className="finance-card"><div className="finance-card-label">支出</div><div className="finance-card-value expense">{selectedDayExpense.toLocaleString()}</div></div>
+                  <div className="finance-card"><div className="finance-card-label">今日の収支</div><div className={`finance-card-value ${selectedDayTotal >= 0 ? 'income' : 'expense'}`}>{selectedDayTotal > 0 ? '+' : ''}{selectedDayTotal.toLocaleString()}</div></div>
+                </div>
+                
+                {/* Income Section */}
+                <div className="ledger-list" style={{ marginTop: '20px' }}>
+                  <div style={{ fontSize: '0.95rem', fontWeight: 'bold', color: 'var(--primary-color)', marginBottom: '8px' }}>収入</div>
+                  {selectedDateFinances.filter(f => f.amount > 0).length > 0 ? (
+                    selectedDateFinances.filter(f => f.amount > 0).map((f) => (
+                      <div key={f.id} className="ledger-item">
+                        <div className="ledger-item-left">
+                          <div className="ledger-item-dot" style={{ backgroundColor: 'var(--primary-color)' }}></div>
+                          <div className="ledger-item-info">
+                            <div className="ledger-item-title">{f.title}</div>
+                            <div className="ledger-item-subtitle">{f.time} • {f.category}</div>
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          <span className="ledger-item-amount plus">+{f.amount.toLocaleString()}</span>
+                          <button className="btn-memo-delete" onClick={() => deleteFinance(f.id)}>削除</button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ padding: '12px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>収入はありません</div>
+                  )}
+                  <button className="btn-detail-add-inline" onClick={() => openAddModal('income', '給料', 'バイト給料')} style={{ margin: '8px 0 16px', padding: '8px' }}>
+                    ＋ 収入を追加
+                  </button>
+                </div>
+
+                {/* Expense Section */}
+                <div className="ledger-list" style={{ marginTop: '10px' }}>
+                  <div style={{ fontSize: '0.95rem', fontWeight: 'bold', color: 'var(--color-red)', marginBottom: '8px' }}>支出</div>
+                  {selectedDateFinances.filter(f => f.amount < 0).length > 0 ? (
+                    selectedDateFinances.filter(f => f.amount < 0).map((f) => (
+                      <div key={f.id} className="ledger-item">
+                        <div className="ledger-item-left">
+                          <div className="ledger-item-dot" style={{ backgroundColor: 'var(--color-red)' }}></div>
+                          <div className="ledger-item-info">
+                            <div className="ledger-item-title">{f.title}</div>
+                            <div className="ledger-item-subtitle">{f.time} • {f.category}</div>
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          <span className="ledger-item-amount minus">{f.amount.toLocaleString()}</span>
+                          <button className="btn-memo-delete" onClick={() => deleteFinance(f.id)}>削除</button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ padding: '12px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>支出はありません</div>
+                  )}
+                  <div className="quick-categories" style={{ marginTop: '12px', padding: '12px' }}>
+                    <button className="cat-btn" onClick={() => openAddModal('expense', '食費', '食事')}><div className="cat-icon" style={{color: 'var(--color-red)'}}>🍴</div><span>食費</span></button>
+                    <button className="cat-btn" onClick={() => openAddModal('expense', '交通費', '電車・バス')}><div className="cat-icon" style={{color: 'var(--primary-color)'}}>🚌</div><span>交通費</span></button>
+                    <button className="cat-btn" onClick={() => openAddModal('expense', '日用品', '買い物')}><div className="cat-icon" style={{color: 'var(--color-green)'}}>🛒</div><span>日用品</span></button>
+                    <button className="cat-btn" onClick={() => openAddModal('expense', '娯楽', '遊び')}><div className="cat-icon" style={{color: 'var(--color-purple)'}}>🎮</div><span>娯楽</span></button>
+                  </div>
+                  <button className="btn-detail-add-inline" onClick={() => openAddModal('expense', '食費', '')} style={{ margin: '8px 0 16px', padding: '8px', color: 'var(--color-red)', borderColor: 'var(--color-red)', background: 'rgba(248,113,113,0.08)' }}>
+                    ＋ 支出を追加
+                  </button>
+                </div>
+
+                <div className="cat-detail-header" style={{ marginTop: '24px', fontSize: '1.2rem', display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--border-color)', paddingTop: '16px', marginBottom: 0 }}>
+                  <span>差額</span>
+                  <span className={selectedDayTotal >= 0 ? 'income' : 'expense'}>
+                    {selectedDayTotal > 0 ? '+' : ''}{selectedDayTotal.toLocaleString()}円
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* --- Category Detail Slide Panel --- */}
+      {isCategoryDetailOpen && (
+        <div className="slide-panel-overlay" style={{ zIndex: 3500 }}>
+          <div className="slide-panel-header">
+            <button className="btn-back" onClick={() => setIsCategoryDetailOpen(false)}><span>&lt;</span></button>
+            <div className="slide-panel-title">{selectedCategory} の内訳</div>
+            <div style={{width: '24px'}}></div>
+          </div>
+          <div className="slide-panel-content">
+            <div className="cat-detail-header">
+              <div style={{fontSize: '1rem', color: 'var(--text-secondary)'}}>合計</div>
+              <div style={{color: 'var(--color-red)'}}>-¥{categoryDetails.reduce((sum, f) => sum + Math.abs(f.amount), 0).toLocaleString()}</div>
+            </div>
+            <div>
+              {categoryDetails.map((f, i) => {
+                const d = safeParseDate(f.date) || new Date();
+                return (
+                  <div key={i} className="cat-detail-row">
+                    <div className="cat-detail-date">{d.getMonth()+1}/{d.getDate()}</div>
+                    <div className="cat-detail-title">{f.title}</div>
+                    <div style={{color: 'var(--color-red)', fontWeight: 'bold'}}>{f.amount.toLocaleString()}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Confirm Recurring Modal --- */}
+      {isConfirmRecurringOpen && (
+        <div className="modal-overlay" style={{ zIndex: 4000 }}>
+          <div className="modal-content">
+            <div className="modal-header">
+              <div className="modal-title">繰り返し登録の確認</div>
+              <button className="btn-close" onClick={() => setIsConfirmRecurringOpen(false)}>&times;</button>
+            </div>
+            <p style={{ fontSize: '0.95rem', color: 'var(--text-primary)', marginBottom: '8px' }}>
+              以下の日程に予定を登録します：
+            </p>
+            <p style={{ fontWeight: 'bold', fontSize: '1.2rem', color: 'var(--primary-color)' }}>
+              {tempScheduleData?.title} {tempScheduleData?.timeStart && `(${tempScheduleData.timeStart} - ${tempScheduleData.timeEnd})`}
+            </p>
+            <div className="confirm-dates-list">
+              {recurringDatesToRegister.map((date, idx) => (
+                <div key={idx} className="confirm-date-item">
+                  • {date.getFullYear()}/{String(date.getMonth() + 1).padStart(2, '0')}/{String(date.getDate()).padStart(2, '0')} ({weekdays[date.getDay()]})
+                </div>
+              ))}
+            </div>
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '24px' }}>
+              この内容で登録しますか？
+            </p>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button className="btn-copy" onClick={() => setIsConfirmRecurringOpen(false)}>キャンセル</button>
+              <button className="btn-share-action" onClick={executeRecurringRegister}>登録する</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- App Update & Cache Subpage --- */}
+      {isUpdateCacheOpen && (
+        <div className="slide-panel-overlay">
+          <div className="slide-panel-header">
+            <button className="btn-back" onClick={() => setIsUpdateCacheOpen(false)}><span>&lt;</span> 設定</button>
+            <div className="slide-panel-title">アプリ更新・キャッシュ</div>
+            <div style={{ width: '48px' }}></div>
+          </div>
+          <div className="slide-panel-content">
+            {/* Update App Section */}
+            <div className="chart-section" style={{ background: 'var(--surface-color)', padding: '20px', borderRadius: '20px', marginBottom: '24px' }}>
+              <div className="chart-title" style={{ fontSize: '1.1rem', marginBottom: '8px' }}>アプリを更新</div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.4' }}>
+                サービスワーカーを更新して、最新 of ライフOS を読み込みます。
+              </p>
+              <button 
+                className="btn-share-action" 
+                style={{ width: '100%', padding: '14px', borderRadius: '12px', fontWeight: 'bold' }}
+                onClick={handleAppUpdate}
+              >
+                アプリ更新
+              </button>
+            </div>
+
+            {/* Clear Cache Section */}
+            <div className="chart-section" style={{ background: 'var(--surface-color)', padding: '20px', borderRadius: '20px', marginBottom: '40px' }}>
+              <div className="chart-title" style={{ fontSize: '1.1rem', marginBottom: '8px', color: 'var(--color-red)' }}>キャッシュの管理</div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.4' }}>
+                ローカルに保存されたキャッシュを削除します。
+              </p>
+              <button 
+                className="btn-share-action" 
+                style={{ width: '100%', padding: '14px', borderRadius: '12px', fontWeight: 'bold', backgroundColor: 'var(--color-red)' }}
+                onClick={() => setCacheModalStep('confirm')}
+              >
+                キャッシュを削除
+              </button>
+            </div>
+
+            <div style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+              現在のバージョン v1.0.0
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Data Management Subpage --- */}
+      {isDataManagementOpen && (
+        <div className="slide-panel-overlay">
+          <div className="slide-panel-header">
+            <button className="btn-back" onClick={() => setIsDataManagementOpen(false)}><span>&lt;</span> 設定</button>
+            <div className="slide-panel-title">データ管理</div>
+            <div style={{ width: '48px' }}></div>
+          </div>
+          <div className="slide-panel-content">
+            <div className="chart-section" style={{ background: 'var(--surface-color)', padding: '20px', borderRadius: '20px', marginBottom: '20px' }}>
+              <div className="chart-title" style={{ fontSize: '1.1rem', marginBottom: '8px' }}>データのバックアップと復元</div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.4' }}>
+                アプリ内の予定、収支、メモのデータをJSON形式でエクスポートまたはインポートします。
+              </p>
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '12px' }}>
+                <button 
+                  className="btn-share-action" 
+                  style={{ flex: 1, padding: '12px', borderRadius: '12px', fontWeight: 'bold', backgroundColor: 'var(--primary-color)' }}
+                  onClick={handleExportData}
+                >
+                  エクスポート
+                </button>
+                <label 
+                  className="btn-share-action" 
+                  style={{ flex: 1, padding: '12px', borderRadius: '12px', fontWeight: 'bold', backgroundColor: 'rgba(255,255,255,0.08)', border: '1px solid var(--border-color)', textAlign: 'center', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  インポート
+                  <input 
+                    type="file" 
+                    accept=".json" 
+                    onChange={handleImportData} 
+                    style={{ display: 'none' }} 
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="chart-section" style={{ background: 'var(--surface-color)', padding: '20px', borderRadius: '20px', marginBottom: '20px' }}>
+              <div className="chart-title" style={{ fontSize: '1.1rem', marginBottom: '8px' }}>予定データの削除</div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.4' }}>
+                保存されているすべての予定データを削除します。この操作は取り消せません。
+              </p>
+              <button 
+                className="btn-share-action" 
+                style={{ width: '100%', padding: '14px', borderRadius: '12px', fontWeight: 'bold', backgroundColor: 'var(--color-red)' }}
+                onClick={() => {
+                  handleClearSchedules();
+                  setIsDataManagementOpen(false);
+                }}
+              >
+                すべての予定を削除
+              </button>
+            </div>
+
+            <div className="chart-section" style={{ background: 'var(--surface-color)', padding: '20px', borderRadius: '20px', marginBottom: '20px' }}>
+              <div className="chart-title" style={{ fontSize: '1.1rem', marginBottom: '8px' }}>収支データの削除</div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.4' }}>
+                保存されているすべての収支データを削除します。この操作は取り消せません。
+              </p>
+              <button 
+                className="btn-share-action" 
+                style={{ width: '100%', padding: '14px', borderRadius: '12px', fontWeight: 'bold', backgroundColor: 'var(--color-red)' }}
+                onClick={() => {
+                  handleClearFinances();
+                  setIsDataManagementOpen(false);
+                }}
+              >
+                すべての収支を削除
+              </button>
+            </div>
+
+            <div className="chart-section" style={{ background: 'var(--surface-color)', padding: '20px', borderRadius: '20px', marginBottom: '40px' }}>
+              <div className="chart-title" style={{ fontSize: '1.1rem', marginBottom: '8px', color: 'var(--color-red)' }}>全データのリセット</div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.4' }}>
+                予定と収支を含むすべてのデータを完全にリセットします。この操作は取り消せません。
+              </p>
+              <button 
+                className="btn-share-action" 
+                style={{ width: '100%', padding: '14px', borderRadius: '12px', fontWeight: 'bold', backgroundColor: 'var(--color-red)' }}
+                onClick={() => {
+                  handleClearAllData();
+                  setIsDataManagementOpen(false);
+                }}
+              >
+                すべてのデータをリセット
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Update Checking Modal */}
+      {updateModalStep === 'checking' && (
+        <div className="modal-overlay" style={{ zIndex: 5000 }}>
+          <div className="modal-content" style={{ textAlign: 'center', maxWidth: '320px' }}>
+            <div className="modal-header" style={{ justifyContent: 'center', marginBottom: '8px' }}>
+              <div className="modal-title">更新の確認</div>
+            </div>
+            <div className="spinner-container">
+              <div className="spinner"></div>
+              <p style={{ fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                新しいバージョンを確認しています...
+              </p>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                通信環境が必要です
+              </p>
+            </div>
+            {/* Simulate transition after 1.5s */}
+            {(() => {
+              setTimeout(() => {
+                if (updateModalStep === 'checking') setUpdateModalStep('success');
+              }, 1500);
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Update Success Modal */}
+      {updateModalStep === 'success' && (
+        <div className="modal-overlay" style={{ zIndex: 5000 }}>
+          <div className="modal-content" style={{ textAlign: 'center', maxWidth: '320px' }}>
+            <div className="spinner-container" style={{ padding: '12px 0' }}>
+              <div style={{ fontSize: '2.5rem', color: 'var(--color-green)' }}>✓</div>
+              <div className="modal-title" style={{ fontSize: '1.15rem', marginTop: '8px' }}>更新が完了しました</div>
+              <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>最新の状態になりました！</p>
+            </div>
+            <button 
+              className="btn-share-action" 
+              style={{ width: '100%', marginTop: '12px' }}
+              onClick={() => {
+                setUpdateModalStep(null);
+                window.location.reload();
+              }}
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Clear Cache Confirm Modal */}
+      {cacheModalStep === 'confirm' && (
+        <div className="modal-overlay" style={{ zIndex: 5000 }}>
+          <div className="modal-content" style={{ maxWidth: '340px' }}>
+            <div className="modal-header">
+              <div className="modal-title" style={{ color: 'var(--color-red)' }}>キャッシュの削除</div>
+              <button className="btn-close" onClick={() => setCacheModalStep(null)}>&times;</button>
+            </div>
+            <p style={{ fontSize: '0.95rem', color: 'var(--text-primary)', marginBottom: '24px', lineHeight: '1.5' }}>
+              オフラインデータを含むキャッシュを削除します。よろしいですか？
+            </p>
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button className="btn-copy" onClick={() => setCacheModalStep(null)}>キャンセル</button>
+              <button 
+                className="btn-share-action" 
+                style={{ backgroundColor: 'var(--color-red)' }}
+                onClick={() => {
+                  if ('caches' in window) {
+                    caches.keys().then((names) => {
+                      for (let name of names) caches.delete(name);
+                    });
+                  }
+                  if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.getRegistrations().then((registrations) => {
+                      for (let registration of registrations) {
+                        registration.unregister();
+                      }
+                    });
+                  }
+                  setCacheModalStep('success');
+                }}
+              >
+                削除する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clear Cache Success Modal */}
+      {cacheModalStep === 'success' && (
+        <div className="modal-overlay" style={{ zIndex: 5000 }}>
+          <div className="modal-content" style={{ textAlign: 'center', maxWidth: '320px' }}>
+            <div className="spinner-container" style={{ padding: '12px 0' }}>
+              <div style={{ fontSize: '2.5rem', color: 'var(--color-green)' }}>✓</div>
+              <div className="modal-title" style={{ fontSize: '1.15rem', marginTop: '8px' }}>キャッシュを削除しました</div>
+              <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>空き容量が増え、動作が軽くなります。</p>
+            </div>
+            <button 
+              className="btn-share-action" 
+              style={{ width: '100%', marginTop: '12px' }}
+              onClick={() => setCacheModalStep(null)}
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Share Selection Modal */}
+      {isShareSelectOpen && (
+        <div className="modal-overlay" style={{ zIndex: 4000 }} onClick={() => setIsShareSelectOpen(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">予定の共有</div>
+              <button className="btn-close" onClick={() => setIsShareSelectOpen(false)}>&times;</button>
+            </div>
+            <p style={{ fontSize: '0.95rem', color: 'var(--text-primary)', marginBottom: '20px', lineHeight: '1.5' }}>
+              共有したい期間を選択してください。クリップボードにコピーされます。
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <button className="btn-share-action" onClick={() => copySchedulesForWeek(false)}>
+                今週の予定をコピー
+              </button>
+              <button className="btn-share-action" style={{ backgroundColor: 'var(--primary-color)' }} onClick={() => copySchedulesForWeek(true)}>
+                来週の予定をコピー
+              </button>
+              <button className="btn-copy" style={{ width: '100%' }} onClick={() => setIsShareSelectOpen(false)}>
+                キャンセル
+              </button>
+            </div>
           </div>
         </div>
       )}
