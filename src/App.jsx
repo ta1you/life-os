@@ -21,6 +21,10 @@ import {
   writeBatch
 } from 'firebase/firestore';
 
+const SCHOOL_AND_WORK_BASE = typeof window !== 'undefined' && window.location.hostname === 'localhost'
+  ? 'http://localhost:5174/school-and-work'
+  : 'https://ta1you.github.io/school-and-work';
+
 function App() {
   const [user, setUser] = useState(null);
   const [authEmail, setAuthEmail] = useState('');
@@ -1461,9 +1465,9 @@ function App() {
                               style={{ cursor: 'pointer' }}
                               onClick={() => {
                                 if (s.isSchool) {
-                                  window.location.href = 'http://localhost:5174/?tab=school';
+                                  window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=school`;
                                 } else if (s.isWork) {
-                                  window.location.href = 'http://localhost:5174/?tab=work';
+                                  window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=work`;
                                 } else {
                                   setSelectedDate(parseDate(s.date));
                                   setDetailTab('schedule');
@@ -2808,7 +2812,7 @@ function App() {
               {/* Footer actions */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--border-color)' }}>
                 <a
-                  href="http://localhost:5174/?tab=school"
+                  href={`${SCHOOL_AND_WORK_BASE}/?tab=school`}
                   className="btn-share-action"
                   style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
