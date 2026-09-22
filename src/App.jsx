@@ -72,6 +72,14 @@ function App() {
 
   const [isShareSelectOpen, setIsShareSelectOpen] = useState(false);
   const [scheduleSearchQuery, setScheduleSearchQuery] = useState('');
+  const [expandedSchoolDays, setExpandedSchoolDays] = useState({});
+
+  const toggleSchoolExpand = (dateKey) => {
+    setExpandedSchoolDays(prev => ({
+      ...prev,
+      [dateKey]: !prev[dateKey]
+    }));
+  };
 
   const [formData, setFormData] = useState({
     title: '',
@@ -1446,10 +1454,40 @@ function App() {
                   <div className="detail-list-subtitle">今日の予定</div>
 
                   <div className="detail-list">
-                    {selectedDateSchedules.length > 0 ? (
-                      selectedDateSchedules.map(s => {
-                        const isSchool = s.isSchool || s.title.includes('学校') || s.title.includes('授業');
-                        const isJob = s.title.includes('バイト') || s.title.includes('アルバイト') || s.isWork;
+                    {(() => {
+                      if (selectedDateSchedules.length === 0) {
+                        return (
+                          <div style={{ color: 'var(--text-secondary)', padding: '10px 0', fontSize: '0.9rem' }}>
+                            予定はありません
+                          </div>
+                        );
+                      }
+
+                      const schoolEvents = selectedDateSchedules.filter(s => s.isSchool || (s.title && (s.title.includes('学校') || s.title.includes('授業'))));
+                      const otherEvents = selectedDateSchedules.filter(s => !(s.isSchool || (s.title && (s.title.includes('学校') || s.title.includes('授業')))));
+
+                      const dateKey = formatDateForInput(selectedDate);
+                      const isSchoolExpanded = !!expandedSchoolDays[dateKey];
+
+                      const earliestTimeStart = schoolEvents.length > 0
+                        ? schoolEvents.reduce((min, s) => (!min || (s.timeStart && s.timeStart < min) ? s.timeStart : min), '')
+                        : '';
+                      const latestTimeEnd = schoolEvents.length > 0
+                        ? schoolEvents.reduce((max, s) => (!max || (s.timeEnd && s.timeEnd > max) ? s.timeEnd : max), '')
+                        : '';
+
+                      const getPeriodBadge = (s, idx) => {
+                        if (s.timeStart === '09:10') return '1限';
+                        if (s.timeStart === '10:50') return '2限';
+                        if (s.timeStart === '13:10') return '3限';
+                        if (s.timeStart === '14:50') return '4限';
+                        if (s.timeStart === '16:30') return '5限';
+                        return `${idx + 1}限`;
+                      };
+
+                      const renderSingleItem = (s) => {
+                        const isSchool = s.isSchool || (s.title && (s.title.includes('学校') || s.title.includes('授業')));
+                        const isJob = (s.title && (s.title.includes('バイト') || s.title.includes('アルバイト'))) || s.isWork;
                         const duration = s.isWork ? s.workHours : (isJob ? calculateDuration(s.timeStart, s.timeEnd) : 0);
                         const salary = s.isWork ? s.estimatedPay : (isJob ? Math.floor(duration * hourlyWage) : 0);
 
@@ -1485,12 +1523,65 @@ function App() {
                             )}
                           </div>
                         );
-                      })
-                    ) : (
-                      <div style={{ color: 'var(--text-secondary)', padding: '10px 0', fontSize: '0.9rem' }}>
-                        予定はありません
-                      </div>
-                    )}
+                      };
+
+                      return (
+                        <>
+                          {/* 学校の授業が複数ある場合は1枠のアコーディオンカードに集約 */}
+                          {schoolEvents.length > 1 ? (
+                            <div className="school-group-card">
+                              <div className="school-group-header" onClick={() => toggleSchoolExpand(dateKey)}>
+                                <div className="detail-item-color" style={{ backgroundColor: schoolEvents[0].color || '#3b82f6' }}></div>
+                                <div className="detail-item-time">
+                                  <span>{earliestTimeStart}</span>
+                                  {latestTimeEnd && <span style={{ opacity: 0.6 }}> - {latestTimeEnd}</span>}
+                                </div>
+                                <div className="school-group-title">
+                                  <span>🏫 学校</span>
+                                  <span className="school-count-badge">{schoolEvents.length}コマ</span>
+                                </div>
+                                <div className="school-dropdown-indicator">
+                                  <span>{isSchoolExpanded ? '閉じる' : '科目を見る'}</span>
+                                  <span className="dropdown-arrow">{isSchoolExpanded ? '▲' : '▼'}</span>
+                                </div>
+                              </div>
+
+                              {isSchoolExpanded && (
+                                <div className="school-dropdown-content">
+                                  {schoolEvents.map((s, idx) => (
+                                    <div
+                                      key={s.id || idx}
+                                      className="school-subitem"
+                                      onClick={() => {
+                                        window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=school`;
+                                      }}
+                                      title="クリックして時間割（School & Work）を開く"
+                                    >
+                                      <div className="school-subitem-period">{getPeriodBadge(s, idx)}</div>
+                                      <div className="school-subitem-title">{s.title.replace(' (学校)', '')}</div>
+                                      <div className="school-subitem-time">{s.timeStart}{s.timeEnd ? ` - ${s.timeEnd}` : ''}</div>
+                                    </div>
+                                  ))}
+                                  <div
+                                    className="school-link-footer"
+                                    onClick={() => {
+                                      window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=school`;
+                                    }}
+                                  >
+                                    🏫 School & Work で時間割を確認・編集する →
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ) : schoolEvents.length === 1 ? (
+                            renderSingleItem(schoolEvents[0])
+                          ) : null}
+
+                          {/* その他の予定（バイト・私用など） */}
+                          {otherEvents.map(s => renderSingleItem(s))}
+                        </>
+                      );
+                    })()}
 
                     <div className="btn-detail-add" onClick={() => openAddModal('schedule')}>
                       <span style={{ fontSize: '1.2rem', color: 'var(--primary-color)' }}>+</span> ここに予定を追加
@@ -1547,16 +1638,38 @@ function App() {
 
                       {activeTopTab === 'schedule' && (
                         <div className="event-chips-container">
-                          {getMergedSchedulesForDate(dayObj.date).slice(0, 2).map((s, i) => {
-                            const isSchool = s.isSchool || s.title.includes('学校') || s.title.includes('授業');
-                            const isWork = s.isWork || s.title.includes('バイト') || s.title.includes('アルバイト');
+                          {(() => {
+                            const allEvents = getMergedSchedulesForDate(dayObj.date);
+                            const schoolEvents = allEvents.filter(s => s.isSchool || (s.title && (s.title.includes('学校') || s.title.includes('授業'))));
+                            const otherEvents = allEvents.filter(s => !(s.isSchool || (s.title && (s.title.includes('学校') || s.title.includes('授業')))));
 
-                            return (
-                              <div key={i} className="event-chip" style={{ backgroundColor: s.color }}>
-                                {isSchool ? '🏫 ' : isWork ? '💼 ' : ''}{s.title}
-                              </div>
-                            );
-                          })}
+                            const displayList = [];
+                            if (schoolEvents.length > 0) {
+                              displayList.push({
+                                isSchoolGroup: true,
+                                title: schoolEvents.length > 1 ? `🏫 学校 (${schoolEvents.length})` : `🏫 ${schoolEvents[0].title.replace(' (学校)', '')}`,
+                                color: schoolEvents[0].color || '#3b82f6',
+                                count: schoolEvents.length
+                              });
+                            }
+                            otherEvents.forEach(e => displayList.push(e));
+
+                            return displayList.slice(0, 2).map((item, i) => {
+                              if (item.isSchoolGroup) {
+                                return (
+                                  <div key={`group-${i}`} className="event-chip event-chip-school-group" style={{ backgroundColor: item.color }}>
+                                    {item.title}
+                                  </div>
+                                );
+                              }
+                              const isWork = item.isWork || (item.title && (item.title.includes('バイト') || item.title.includes('アルバイト')));
+                              return (
+                                <div key={i} className="event-chip" style={{ backgroundColor: item.color }}>
+                                  {isWork ? '💼 ' : ''}{item.title}
+                                </div>
+                              );
+                            });
+                          })()}
                         </div>
                       )}
 
