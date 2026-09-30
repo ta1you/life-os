@@ -1485,40 +1485,78 @@ function App() {
                         return `${idx + 1}限`;
                       };
 
+                      const getClassTypeBadge = (classType) => {
+                        if (classType === 'zoom') {
+                          return <span className="school-type-badge badge-zoom">💻 Zoom</span>;
+                        }
+                        if (classType === 'ondemand') {
+                          return <span className="school-type-badge badge-ondemand">📺 オンデマンド</span>;
+                        }
+                        return <span className="school-type-badge badge-inperson">🏫 対面</span>;
+                      };
+
+                      const inPersonCount = schoolEvents.filter(s => !s.classType || s.classType === 'in_person').length;
+                      const zoomCount = schoolEvents.filter(s => s.classType === 'zoom').length;
+                      const ondemandCount = schoolEvents.filter(s => s.classType === 'ondemand').length;
+                      const hasInPerson = inPersonCount > 0;
+                      const headerTitle = hasInPerson ? '🏫 学校 (登校)' : '💻 在宅講義 (オンライン)';
+
                       const renderSingleItem = (s) => {
                         const isSchool = s.isSchool || (s.title && (s.title.includes('学校') || s.title.includes('授業')));
                         const isJob = (s.title && (s.title.includes('バイト') || s.title.includes('アルバイト'))) || s.isWork;
                         const duration = s.isWork ? s.workHours : (isJob ? calculateDuration(s.timeStart, s.timeEnd) : 0);
                         const salary = s.isWork ? s.estimatedPay : (isJob ? Math.floor(duration * hourlyWage) : 0);
+                        const isUrl = s.classroom && (s.classroom.startsWith('http://') || s.classroom.startsWith('https://'));
 
                         return (
-                          <div key={s.id} className="detail-item">
-                            <div className="detail-item-color" style={{ backgroundColor: s.color }}></div>
-                            <div className="detail-item-time">
-                              <span>{s.timeStart}</span>
-                              {s.timeEnd && <span style={{ opacity: 0.6 }}> - {s.timeEnd}</span>}
-                            </div>
-                            <div
-                              className="detail-item-title"
-                              style={{ cursor: 'pointer' }}
-                              onClick={() => {
-                                if (s.isSchool) {
-                                  window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=school`;
-                                } else if (s.isWork) {
-                                  window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=work`;
-                                } else {
-                                  setSelectedDate(parseDate(s.date));
-                                  setDetailTab('schedule');
-                                  setIsDailyDetailOpen(true);
-                                }
-                              }}
-                            >
-                              {isSchool ? '🏫 ' : isJob ? '💼 ' : ''}{s.title}
+                          <div key={s.id} className="detail-item" style={{ flexDirection: isSchool && s.classroom ? 'column' : 'row', alignItems: isSchool && s.classroom ? 'stretch' : 'center', gap: isSchool && s.classroom ? '6px' : '12px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', width: '100%' }}>
+                              <div className="detail-item-color" style={{ backgroundColor: s.color }}></div>
+                              <div className="detail-item-time">
+                                <span>{s.timeStart}</span>
+                                {s.timeEnd && <span style={{ opacity: 0.6 }}> - {s.timeEnd}</span>}
+                              </div>
+                              <div
+                                className="detail-item-title"
+                                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}
+                                onClick={() => {
+                                  if (s.isSchool) {
+                                    window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=school`;
+                                  } else if (s.isWork) {
+                                    window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=work`;
+                                  } else {
+                                    setSelectedDate(parseDate(s.date));
+                                    setDetailTab('schedule');
+                                    setIsDailyDetailOpen(true);
+                                  }
+                                }}
+                              >
+                                <span>{isSchool ? '🏫 ' : isJob ? '💼 ' : ''}{s.title}</span>
+                                {isSchool && getClassTypeBadge(s.classType)}
+                              </div>
+
+                              {isJob && (
+                                <div className="detail-item-inline-salary">
+                                  {duration.toFixed(1)}時間 / ¥{salary.toLocaleString()}
+                                </div>
+                              )}
                             </div>
 
-                            {isJob && (
-                              <div className="detail-item-inline-salary">
-                                {duration.toFixed(1)}時間 / ¥{salary.toLocaleString()}
+                            {isSchool && s.classroom && (
+                              <div style={{ paddingLeft: '112px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                {isUrl ? (
+                                  <a
+                                    href={s.classroom}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="school-url-link-btn"
+                                    onClick={e => e.stopPropagation()}
+                                  >
+                                    🔗 {s.classType === 'zoom' ? 'Zoom講義に参加する' : s.classType === 'ondemand' ? '講義ページを開く' : '受講リンクを開く'} ↗
+                                  </a>
+                                ) : (
+                                  <span className="school-location-text">📍 教室: {s.classroom}</span>
+                                )}
                               </div>
                             )}
                           </div>
@@ -1531,14 +1569,17 @@ function App() {
                           {schoolEvents.length > 1 ? (
                             <div className="school-group-card">
                               <div className="school-group-header" onClick={() => toggleSchoolExpand(dateKey)}>
-                                <div className="detail-item-color" style={{ backgroundColor: schoolEvents[0].color || '#3b82f6' }}></div>
+                                <div className="detail-item-color" style={{ backgroundColor: schoolEvents[0].color || (hasInPerson ? '#3b82f6' : '#8b5cf6') }}></div>
                                 <div className="detail-item-time">
                                   <span>{earliestTimeStart}</span>
                                   {latestTimeEnd && <span style={{ opacity: 0.6 }}> - {latestTimeEnd}</span>}
                                 </div>
                                 <div className="school-group-title">
-                                  <span>🏫 学校</span>
-                                  <span className="school-count-badge">{schoolEvents.length}コマ</span>
+                                  <span>{headerTitle}</span>
+                                  <span className="school-count-badge">
+                                    {schoolEvents.length}コマ
+                                    {hasInPerson && zoomCount > 0 ? ` (対面${inPersonCount} / Zoom${zoomCount})` : ''}
+                                  </span>
                                 </div>
                                 <div className="school-dropdown-indicator">
                                   <span>{isSchoolExpanded ? '閉じる' : '科目を見る'}</span>
@@ -1548,20 +1589,46 @@ function App() {
 
                               {isSchoolExpanded && (
                                 <div className="school-dropdown-content">
-                                  {schoolEvents.map((s, idx) => (
-                                    <div
-                                      key={s.id || idx}
-                                      className="school-subitem"
-                                      onClick={() => {
-                                        window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=school`;
-                                      }}
-                                      title="クリックして時間割（School & Work）を開く"
-                                    >
-                                      <div className="school-subitem-period">{getPeriodBadge(s, idx)}</div>
-                                      <div className="school-subitem-title">{s.title.replace(' (学校)', '')}</div>
-                                      <div className="school-subitem-time">{s.timeStart}{s.timeEnd ? ` - ${s.timeEnd}` : ''}</div>
-                                    </div>
-                                  ))}
+                                  {schoolEvents.map((s, idx) => {
+                                    const isUrl = s.classroom && (s.classroom.startsWith('http://') || s.classroom.startsWith('https://'));
+                                    return (
+                                      <div
+                                        key={s.id || idx}
+                                        className="school-subitem"
+                                        onClick={() => {
+                                          window.location.href = `${SCHOOL_AND_WORK_BASE}/?tab=school`;
+                                        }}
+                                        title="クリックして時間割（School & Work）を開く"
+                                      >
+                                        <div className="school-subitem-top">
+                                          <div className="school-subitem-period">{getPeriodBadge(s, idx)}</div>
+                                          <div className="school-subitem-title">{s.title.replace(' (学校)', '')}</div>
+                                          {getClassTypeBadge(s.classType)}
+                                          <div className="school-subitem-time">{s.timeStart}{s.timeEnd ? ` - ${s.timeEnd}` : ''}</div>
+                                        </div>
+
+                                        {s.classroom && (
+                                          <div className="school-subitem-bottom" onClick={e => e.stopPropagation()}>
+                                            {isUrl ? (
+                                              <a
+                                                href={s.classroom}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="school-url-link-btn"
+                                                title="受講リンクを開く"
+                                              >
+                                                🔗 {s.classType === 'zoom' ? 'Zoom講義に参加する' : s.classType === 'ondemand' ? '講義ページを開く' : '受講リンクを開く'} ↗
+                                              </a>
+                                            ) : (
+                                              <span className="school-location-text">
+                                                📍 教室: {s.classroom}
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
                                   <div
                                     className="school-link-footer"
                                     onClick={() => {
@@ -1645,10 +1712,32 @@ function App() {
 
                             const displayList = [];
                             if (schoolEvents.length > 0) {
+                              const hasInPerson = schoolEvents.some(s => !s.classType || s.classType === 'in_person');
+                              const allZoom = schoolEvents.every(s => s.classType === 'zoom');
+                              const allOndemand = schoolEvents.every(s => s.classType === 'ondemand');
+
+                              let groupTitle = `🏫 学校 (${schoolEvents.length})`;
+                              let groupColor = '#3b82f6';
+
+                              if (!hasInPerson) {
+                                if (allZoom) {
+                                  groupTitle = `💻 Zoom (${schoolEvents.length})`;
+                                  groupColor = '#8b5cf6';
+                                } else if (allOndemand) {
+                                  groupTitle = `📺 オンデマンド (${schoolEvents.length})`;
+                                  groupColor = '#10b981';
+                                } else {
+                                  groupTitle = `💻 在宅講義 (${schoolEvents.length})`;
+                                  groupColor = '#8b5cf6';
+                                }
+                              } else if (schoolEvents.length === 1) {
+                                groupTitle = `🏫 ${schoolEvents[0].title.replace(' (学校)', '')}`;
+                              }
+
                               displayList.push({
                                 isSchoolGroup: true,
-                                title: schoolEvents.length > 1 ? `🏫 学校 (${schoolEvents.length})` : `🏫 ${schoolEvents[0].title.replace(' (学校)', '')}`,
-                                color: schoolEvents[0].color || '#3b82f6',
+                                title: groupTitle,
+                                color: groupColor,
                                 count: schoolEvents.length
                               });
                             }
