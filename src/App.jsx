@@ -388,8 +388,9 @@ function App() {
         return {
           id: `shift-${s.id}`,
           title: `${s.store} (バイト)`,
-          timeStart: formatTime(sStart),
-          timeEnd: formatTime(sEnd),
+          timeStart: s.timeStart || formatTime(sStart),
+          timeEnd: s.timeEnd || formatTime(sEnd),
+          store: s.store,
           color: '#ef8f3b',
           date,
           isWork: true,
@@ -410,7 +411,17 @@ function App() {
         (l.isSchool && l.timeStart === se.timeStart && l.title === se.title)
       );
     });
-    const workEvents = getShiftSchedulesForDate(date);
+    const workEvents = getShiftSchedulesForDate(date).filter(workEvent =>
+      !local.some(schedule => {
+        const isWorkSchedule = schedule.isWork ||
+          (schedule.title && (schedule.title.includes('バイト') || schedule.title.includes('アルバイト')));
+        if (!isWorkSchedule || schedule.timeStart !== workEvent.timeStart || schedule.timeEnd !== workEvent.timeEnd) {
+          return false;
+        }
+
+        return (schedule.location || schedule.title) === workEvent.store || schedule.title === workEvent.store;
+      })
+    );
 
     return [...local, ...schoolEvents, ...workEvents].sort((a, b) =>
       (a.timeStart || '').localeCompare(b.timeStart || '')
